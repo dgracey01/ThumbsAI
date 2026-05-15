@@ -1,0 +1,826 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ThumbsAI — Help</title>
+<style>
+/* ── Palette (matches ThumbsAI theme) ─────────────────────────── */
+:root{
+  --bg:    #1a1a2e;
+  --pan:   #242424;
+  --car:   #16213e;
+  --brd:   #444466;
+  --acc:   #1f6feb;
+  --grn:   #2ea043;
+  --amb:   #EF9F27;
+  --red:   #da3633;
+  --pri:   #ffffff;
+  --sec:   #a0a0a0;
+  --muted: #666680;
+  --code:  #0f1a2e;
+  --sidebar-w: 240px;
+}
+
+/* ── Reset & base ─────────────────────────────────────────────── */
+*{box-sizing:border-box;margin:0;padding:0;}
+html{scroll-behavior:smooth;}
+body{
+  background:var(--bg);
+  color:var(--pri);
+  font-family:Consolas,monospace;
+  font-size:13px;
+  line-height:1.65;
+  display:flex;
+  min-height:100vh;
+}
+
+/* ── Sidebar ──────────────────────────────────────────────────── */
+#sidebar{
+  position:fixed;
+  top:0;left:0;bottom:0;
+  width:var(--sidebar-w);
+  background:var(--pan);
+  border-right:1px solid var(--brd);
+  overflow-y:auto;
+  padding:0 0 24px 0;
+  z-index:100;
+}
+#sidebar-header{
+  padding:16px 14px 12px;
+  border-bottom:1px solid var(--brd);
+  margin-bottom:8px;
+}
+#sidebar-header .app-name{
+  font-size:15px;font-weight:bold;color:var(--acc);letter-spacing:1px;
+}
+#sidebar-header .app-sub{
+  font-size:10px;color:var(--sec);margin-top:2px;
+}
+#sidebar nav a{
+  display:block;
+  padding:5px 14px;
+  color:var(--sec);
+  text-decoration:none;
+  font-size:11px;
+  border-left:2px solid transparent;
+  transition:all .15s;
+}
+#sidebar nav a:hover{color:var(--pri);background:rgba(255,255,255,.04);}
+#sidebar nav a.active{color:var(--acc);border-left-color:var(--acc);background:rgba(31,111,235,.08);}
+#sidebar nav .section-label{
+  padding:14px 14px 4px;
+  font-size:10px;
+  color:var(--muted);
+  text-transform:uppercase;
+  letter-spacing:1px;
+}
+
+/* ── Main content ─────────────────────────────────────────────── */
+#content{
+  margin-left:var(--sidebar-w);
+  flex:1;
+  max-width:860px;
+  padding:40px 48px;
+}
+
+/* ── Section headings ─────────────────────────────────────────── */
+h1{font-size:22px;color:var(--acc);margin-bottom:6px;letter-spacing:.5px;}
+h2{
+  font-size:17px;color:var(--pri);
+  margin:36px 0 12px;
+  padding-bottom:6px;
+  border-bottom:1px solid var(--brd);
+}
+h3{font-size:14px;color:var(--amb);margin:22px 0 8px;}
+h4{font-size:13px;color:var(--sec);margin:14px 0 6px;font-weight:bold;}
+
+p{margin:0 0 10px;}
+ul,ol{margin:0 0 12px 20px;}
+li{margin-bottom:4px;}
+
+a{color:var(--acc);text-decoration:none;}
+a:hover{text-decoration:underline;}
+
+/* ── Sections ─────────────────────────────────────────────────── */
+.section{padding-bottom:24px;border-bottom:1px solid rgba(68,68,102,.35);margin-bottom:8px;}
+.section:last-child{border-bottom:none;}
+
+/* ── Code / inline code ───────────────────────────────────────── */
+code{
+  background:var(--code);color:#7ec8e3;
+  padding:1px 6px;border-radius:4px;font-family:Consolas,monospace;font-size:12px;
+}
+pre{
+  background:var(--code);color:#cdd6f4;
+  padding:14px 18px;border-radius:8px;
+  border:1px solid var(--brd);
+  overflow-x:auto;margin:10px 0 14px;font-size:12px;line-height:1.55;
+}
+
+/* ── Callouts ─────────────────────────────────────────────────── */
+.note,.warn,.tip{
+  border-radius:6px;padding:10px 14px;margin:12px 0;
+  border-left:3px solid;font-size:12px;
+}
+.note{background:rgba(31,111,235,.12);border-color:var(--acc);}
+.warn{background:rgba(218,54,51,.12);border-color:var(--red);}
+.tip {background:rgba(239,159,39,.12);border-color:var(--amb);}
+.note strong,.warn strong,.tip strong{display:block;margin-bottom:3px;}
+
+/* ── Tables ───────────────────────────────────────────────────── */
+table{width:100%;border-collapse:collapse;margin:10px 0 16px;font-size:12px;}
+th{background:var(--car);color:var(--sec);text-align:left;padding:7px 12px;border-bottom:1px solid var(--brd);}
+td{padding:6px 12px;border-bottom:1px solid rgba(68,68,102,.3);vertical-align:top;}
+tr:hover td{background:rgba(255,255,255,.025);}
+
+/* ── Color pills ──────────────────────────────────────────────── */
+.pill{
+  display:inline-block;padding:1px 8px;border-radius:10px;
+  font-size:11px;font-weight:bold;color:#000;margin-right:4px;
+}
+.pill-yellow{background:#d4a43a;}
+.pill-blue  {background:#4ca8d4;}
+.pill-green {background:#4caf50;}
+.pill-amber {background:#EF9F27;}
+.pill-cyan  {background:#00bcd4;}
+
+/* ── Kbd keys ─────────────────────────────────────────────────── */
+kbd{
+  background:var(--pan);color:var(--pri);border:1px solid var(--brd);
+  border-bottom-width:2px;border-radius:4px;
+  padding:1px 6px;font-size:11px;font-family:Consolas,monospace;
+}
+
+/* ── Top banner ───────────────────────────────────────────────── */
+.banner{
+  background:linear-gradient(135deg,var(--car) 0%,#0d1b3e 100%);
+  border:1px solid var(--brd);border-radius:10px;
+  padding:24px 28px;margin-bottom:32px;
+}
+.banner h1{margin-bottom:4px;}
+.banner p{color:var(--sec);margin:0;}
+
+/* ── Version badge ────────────────────────────────────────────── */
+.badge{
+  display:inline-block;background:var(--acc);color:#fff;
+  font-size:11px;padding:2px 8px;border-radius:10px;margin-left:8px;
+  vertical-align:middle;
+}
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════ SIDEBAR ═══════════════════ -->
+<div id="sidebar">
+  <div id="sidebar-header">
+    <div class="app-name">ThumbsAI</div>
+    <div class="app-sub">AI Image Browser — Help</div>
+  </div>
+  <nav>
+    <div class="section-label">Getting Started</div>
+    <a href="#intro">Introduction</a>
+    <a href="#requirements">Requirements</a>
+    <a href="#install">Installation</a>
+    <a href="#firstrun">First Run</a>
+
+    <div class="section-label">Interface</div>
+    <a href="#overview">Overview</a>
+    <a href="#folder-panel">Folder Panel</a>
+    <a href="#thumbnail-grid">Thumbnail Grid</a>
+    <a href="#toolbar">Toolbar</a>
+    <a href="#task-queue">Task Queue</a>
+
+    <div class="section-label">Features</div>
+    <a href="#folder-colors">Folder Colors</a>
+    <a href="#favorites">Favorites</a>
+    <a href="#watched">Watched Folders</a>
+    <a href="#scanning">Scanning</a>
+    <a href="#viewer">Image Viewer</a>
+    <a href="#sort-search">Sort &amp; Search</a>
+
+    <div class="section-label">AI Metadata</div>
+    <a href="#metadata-overview">Overview</a>
+    <a href="#metadata-view">Viewing Metadata</a>
+    <a href="#metadata-edit">Editing &amp; Saving</a>
+    <a href="#metadata-formats">Supported Formats</a>
+
+    <div class="section-label">Tools</div>
+    <a href="#image-ops">Image Operations</a>
+    <a href="#plugins">Photoshop Plugins</a>
+    <a href="#launch-apps">Launch Apps</a>
+    <a href="#batch">Batch Processing</a>
+
+    <div class="section-label">Reference</div>
+    <a href="#settings">Settings Reference</a>
+    <a href="#shortcuts">Keyboard Shortcuts</a>
+    <a href="#user-data">Your Data</a>
+    <a href="#troubleshoot">Troubleshooting</a>
+  </nav>
+</div>
+
+<!-- ═══════════════════ CONTENT ═══════════════════ -->
+<div id="content">
+
+  <div class="banner">
+    <h1>ThumbsAI <span class="badge">v1.0</span></h1>
+    <p>AI Image Browser — Designed by Zero &nbsp;|&nbsp; Built by Jarvis</p>
+  </div>
+
+  <!-- ─── INTRODUCTION ─── -->
+  <div class="section" id="intro">
+    <h2>Introduction</h2>
+    <p>ThumbsAI is a fast, offline AI image browser for Windows. It generates and caches thumbnails for large collections of AI-generated images, reads generation metadata embedded in PNG files (prompt, seed, model, sampler, CFG scale), and lets you browse, search, sort, edit, and organize your images without any cloud dependency.</p>
+    <p>Key capabilities:</p>
+    <ul>
+      <li>Reads AI metadata from <strong>Automatic1111 / AUTOMATIC1111</strong>, <strong>ComfyUI</strong>, <strong>NovelAI</strong>, and <strong>InvokeAI</strong> PNG files</li>
+      <li>Persistent SQLite thumbnail cache — folders open instantly after first scan</li>
+      <li>Watched folders that auto-update on app start and on disk changes</li>
+      <li>Photoshop <code>.8bf</code> plugin pipeline for non-destructive filters</li>
+      <li>Similarity sort — visually sort images by perceptual similarity to a selected image</li>
+      <li>Video thumbnail support (requires FFmpeg)</li>
+      <li>ZIP archive browsing</li>
+    </ul>
+  </div>
+
+  <!-- ─── REQUIREMENTS ─── -->
+  <div class="section" id="requirements">
+    <h2>Requirements</h2>
+    <table>
+      <tr><th>Component</th><th>Requirement</th></tr>
+      <tr><td>OS</td><td>Windows 10 / Windows 11 (64-bit)</td></tr>
+      <tr><td>Python</td><td>3.11 or later (auto-installed by INSTALL.bat if missing)</td></tr>
+      <tr><td>PySide6</td><td>≥ 6.6.0 (Qt 6 GUI framework)</td></tr>
+      <tr><td>Pillow</td><td>≥ 10.0.0 (image decoding)</td></tr>
+      <tr><td>pillow-avif-plugin</td><td>Optional — enables AVIF format support</td></tr>
+      <tr><td>FFmpeg</td><td>Optional — required for video thumbnails. Set path in Settings.</td></tr>
+      <tr><td>Disk space</td><td>The thumbnail database grows as you scan folders. Allow 1–10 GB depending on collection size.</td></tr>
+    </table>
+  </div>
+
+  <!-- ─── INSTALLATION ─── -->
+  <div class="section" id="install">
+    <h2>Installation</h2>
+    <h3>Step 1 — Run INSTALL.bat</h3>
+    <p>Double-click <code>INSTALL.bat</code>. It will:</p>
+    <ol>
+      <li>Check for Python 3.11+. If not found, attempt to install it via <code>winget</code>.</li>
+      <li>Create a Python virtual environment in the <code>.venv\</code> folder.</li>
+      <li>Install all required packages (PySide6, Pillow, pillow-avif-plugin).</li>
+    </ol>
+    <div class="note"><strong>Note</strong> If the optional <code>pillow-avif-plugin</code> fails to install (some systems lack a C compiler), the installer automatically retries without it. AVIF files will simply not be supported.</div>
+
+    <h3>Step 2 — Launch the app</h3>
+    <p>Double-click <code>run.bat</code> or create a desktop shortcut to it. The app opens with no console window.</p>
+
+    <h3>Updating</h3>
+    <p>To update to a new version:</p>
+    <ol>
+      <li>Close ThumbsAI.</li>
+      <li>Run <code>BACKUP_DATA.bat</code> to snapshot your settings and database.</li>
+      <li>Copy the new version files over your existing installation folder, <em>skipping</em> the <code>data\</code> folder.</li>
+      <li>Run <code>INSTALL.bat</code> again to update Python packages if needed.</li>
+      <li>Launch with <code>run.bat</code>.</li>
+    </ol>
+    <div class="tip"><strong>Tip</strong> Your thumbnail database and settings are stored in <code>data\</code>. Never overwrite that folder when updating unless you intend to start fresh.</div>
+  </div>
+
+  <!-- ─── FIRST RUN ─── -->
+  <div class="section" id="firstrun">
+    <h2>First Run</h2>
+    <ol>
+      <li>Launch via <code>run.bat</code>.</li>
+      <li>In the <strong>Folder Panel</strong> on the left, expand the drive tree and click a folder containing images.</li>
+      <li>ThumbsAI will scan the folder in the background and display thumbnails as they are generated.</li>
+      <li>Folders you want to keep current automatically — right-click them in the panel and choose <strong>Always Watch this Folder</strong>.</li>
+    </ol>
+    <p>The first scan of a large folder can take several minutes. Subsequent opens are instant (cached).</p>
+  </div>
+
+  <!-- ─── OVERVIEW ─── -->
+  <div class="section" id="overview">
+    <h2>Interface Overview</h2>
+    <p>The main window has four regions:</p>
+    <table>
+      <tr><th>Region</th><th>Location</th><th>Purpose</th></tr>
+      <tr><td><strong>Folder Panel</strong></td><td>Left side</td><td>Navigate the file system, manage favorites and watched folders</td></tr>
+      <tr><td><strong>Toolbar</strong></td><td>Top</td><td>Actions, sorting controls, thumbnail size slider, search</td></tr>
+      <tr><td><strong>Thumbnail Grid</strong></td><td>Center</td><td>Displays image thumbnails for the selected folder</td></tr>
+      <tr><td><strong>Task Queue</strong></td><td>Bottom-left (below Folder Panel)</td><td>Shows background scan and processing tasks</td></tr>
+    </table>
+    <p>The splitter between the Folder Panel and the grid can be dragged to resize. The Task Queue panel can be hidden via <strong>Settings → Show Tasks Panel</strong>.</p>
+  </div>
+
+  <!-- ─── FOLDER PANEL ─── -->
+  <div class="section" id="folder-panel">
+    <h2>Folder Panel</h2>
+    <p>The left panel shows a live filesystem tree starting from your drives. Click any folder to load its thumbnails into the grid.</p>
+
+    <h3>Panel Header Buttons</h3>
+    <table>
+      <tr><th>Control</th><th>Action</th></tr>
+      <tr><td><strong>★ Favorites</strong> checkbox</td><td>Toggle to show only your favorited folders as a flat list (much faster loading)</td></tr>
+      <tr><td><strong>⟳</strong> button</td><td>Refresh folder color indicators from the database</td></tr>
+    </table>
+
+    <h3>Right-Click Menu</h3>
+    <table>
+      <tr><th>Item</th><th>Description</th></tr>
+      <tr><td>☆ Add to Favorites / ★ Remove from Favorites</td><td>Toggle this folder in the favorites list</td></tr>
+      <tr><td>👁 Always Watch this Folder</td><td>Add to watched list — scanned on every app start and on file changes</td></tr>
+      <tr><td>👁 Stop Watching this Folder</td><td>Remove from watched list</td></tr>
+    </table>
+  </div>
+
+  <!-- ─── FOLDER COLORS ─── -->
+  <div class="section" id="folder-colors">
+    <h2>Folder Color Indicators</h2>
+    <p>Each folder in the tree is colored to indicate its scan status at a glance:</p>
+    <table>
+      <tr><th>Color</th><th>Meaning</th></tr>
+      <tr><td><span class="pill pill-yellow">Yellow</span></td><td>Folder has not been scanned yet — no thumbnails in the database</td></tr>
+      <tr><td><span class="pill pill-blue">Blue</span></td><td>Folder has been scanned and has thumbnails in the database</td></tr>
+      <tr><td><span class="pill pill-green">Green</span></td><td>A sub-folder of this folder has thumbnails (this folder itself may not)</td></tr>
+      <tr><td><span class="pill pill-amber">Amber</span></td><td>This folder is in your Favorites list</td></tr>
+      <tr><td><span class="pill pill-cyan">Cyan</span></td><td>This folder is in the Always-Watch list</td></tr>
+    </table>
+    <div class="note"><strong>Note</strong> Color indicators are loaded from the database in a background thread at startup. They may appear briefly yellow before populating.</div>
+  </div>
+
+  <!-- ─── FAVORITES ─── -->
+  <div class="section" id="favorites">
+    <h2>Favorites</h2>
+    <p>Favorites give you quick access to a curated set of folders without scrolling through the full filesystem tree.</p>
+    <ul>
+      <li>Right-click any folder → <strong>☆ Add to Favorites</strong>.</li>
+      <li>Enable the <strong>★ Favorites</strong> checkbox in the panel header to switch to the flat favorites view.</li>
+      <li>In Favorites mode the tree is replaced by a simple list — no filesystem scanning, instant display.</li>
+      <li>The Favorites checkbox state is saved and restored on every launch.</li>
+      <li>If you frequently work with a small set of folders, keeping Favorites enabled on startup noticeably speeds up initial load time.</li>
+    </ul>
+  </div>
+
+  <!-- ─── WATCHED FOLDERS ─── -->
+  <div class="section" id="watched">
+    <h2>Watched Folders</h2>
+    <p>Watched folders are scanned automatically in two situations:</p>
+    <ul>
+      <li><strong>On app start</strong> — every watched folder is queued for a scan when ThumbsAI launches.</li>
+      <li><strong>On file changes</strong> — the OS filesystem watcher detects new or modified files and triggers a re-scan within seconds.</li>
+    </ul>
+    <div class="tip"><strong>Tip</strong> Use watched folders for your active output directories (e.g. your A1111 <code>outputs\</code> folder). New images will appear in the grid automatically without any manual action.</div>
+    <div class="note"><strong>Note</strong> The file watcher monitors up to 120 subdirectory paths per watched root. Very deep directory trees may not have all leaf folders watched, but the root and immediate children are always covered.</div>
+
+    <h3>Watched Folders vs Auto-Scan</h3>
+    <table>
+      <tr><th>Feature</th><th>Auto-Scan</th><th>Watched Folders</th></tr>
+      <tr><td>When it runs</td><td>Every time you click a folder in the panel</td><td>On launch + on disk changes</td></tr>
+      <tr><td>Folders covered</td><td>Whichever folder you click</td><td>Only folders on the watch list</td></tr>
+      <tr><td>Good for</td><td>Exploring all folders</td><td>Active output directories you always want current</td></tr>
+    </table>
+    <p>You can enable both. They deduplicate — if you click a watched folder while it is already being scanned, a second scan is not started.</p>
+  </div>
+
+  <!-- ─── SCANNING ─── -->
+  <div class="section" id="scanning">
+    <h2>Scanning</h2>
+    <h3>How Scanning Works</h3>
+    <p>When a folder is scanned, ThumbsAI:</p>
+    <ol>
+      <li>Walks the folder tree (including all sub-folders) using fast OS-level directory enumeration.</li>
+      <li>Compares each file's modification time against the cached value in the database.</li>
+      <li>Skips files whose mtime matches the cache — unchanged files cost almost nothing.</li>
+      <li>For changed or new files, reads the image, generates a thumbnail, extracts AI metadata, and stores everything in the database.</li>
+      <li>Emits each completed thumbnail to the grid in real-time — you see results as they appear, not only at the end.</li>
+    </ol>
+    <div class="note"><strong>Note</strong> Scanning runs on a background thread and never blocks the UI. You can browse other folders and use all other features while a scan is in progress.</div>
+
+    <h3>Manual Scan Controls (Toolbar)</h3>
+    <table>
+      <tr><th>Button</th><th>Action</th></tr>
+      <tr><td>Scan Folder</td><td>Re-scan the current folder (picks up new/changed files)</td></tr>
+      <tr><td>Remove Orphans</td><td>Remove database entries for files that no longer exist on disk (current folder)</td></tr>
+      <tr><td>Scan Disk</td><td>Re-scan all folders that have ever been scanned</td></tr>
+      <tr><td>Remove All Orphans</td><td>Remove orphaned database entries across the entire database</td></tr>
+      <tr><td>Make Selected</td><td>Regenerate the thumbnail for the currently selected image</td></tr>
+    </table>
+
+    <h3>Supported File Types</h3>
+    <p>PNG, JPEG, WebP, BMP, TIFF, GIF, AVIF (if plugin installed), and common video formats (MP4, MKV, AVI, MOV — thumbnail only, requires FFmpeg). ZIP archives containing images are also browsed in-place.</p>
+  </div>
+
+  <!-- ─── THUMBNAIL GRID ─── -->
+  <div class="section" id="thumbnail-grid">
+    <h2>Thumbnail Grid</h2>
+    <p>The central area shows thumbnails for the active folder. Each card displays the filename below the image.</p>
+
+    <h3>Thumbnail Card Context Menu (right-click)</h3>
+    <table>
+      <tr><th>Item</th><th>Description</th></tr>
+      <tr><td>Metadata</td><td>Open the Properties dialog to view/edit AI metadata</td></tr>
+      <tr><td>Open</td><td>Open the image in the built-in viewer</td></tr>
+      <tr><td>Open in Explorer</td><td>Reveal the file in Windows Explorer</td></tr>
+      <tr><td>Open With</td><td>Open with a configured external app (see Launch Apps)</td></tr>
+      <tr><td>Apply Filter</td><td>Run a Photoshop .8bf plugin on the image (see Plugins)</td></tr>
+      <tr><td>Copy to</td><td>Copy file to a recent or new destination folder</td></tr>
+      <tr><td>Move to</td><td>Move file to a recent or new destination folder</td></tr>
+      <tr><td>Rename…</td><td>Rename the file inline</td></tr>
+      <tr><td>Set Thumbnail…</td><td>Manually set thumbnail from another file (videos, .safetensors)</td></tr>
+      <tr><td>Delete</td><td>Send file to the Recycle Bin (with optional confirmation)</td></tr>
+    </table>
+
+    <h3>Thumbnail Size</h3>
+    <p>Use the <strong>size slider</strong> in the toolbar to adjust thumbnail display size. This is a display-only change — thumbnails are stored at a fixed resolution in the database.</p>
+  </div>
+
+  <!-- ─── TOOLBAR ─── -->
+  <div class="section" id="toolbar">
+    <h2>Toolbar</h2>
+    <p>The toolbar has two rows. Icon buttons in the first row are drag-reorderable — hold and drag any button to rearrange it to your preference.</p>
+
+    <h3>Row 1 — Action Buttons</h3>
+    <table>
+      <tr><th>Button</th><th>Description</th></tr>
+      <tr><td>Make Selected</td><td>Regenerate thumbnail for the selected image</td></tr>
+      <tr><td>Scan Folder ▾</td><td>Scan current folder / Remove Orphans</td></tr>
+      <tr><td>Scan Disk ▾</td><td>Scan all known folders / Remove All Orphans</td></tr>
+      <tr><td>Batch Process ▾</td><td>Batch Pipeline / Batch Save As</td></tr>
+      <tr><td>Copy To</td><td>Copy selected images to another folder</td></tr>
+      <tr><td>Move To</td><td>Move selected images to another folder</td></tr>
+      <tr><td>Copy to Clipboard</td><td>Copy the selected image to the Windows clipboard</td></tr>
+      <tr><td>Paste from Clipboard</td><td>Save the current clipboard image to the active folder</td></tr>
+      <tr><td>≋ Sort by Similarity</td><td>Reorder grid by visual similarity to the selected image</td></tr>
+      <tr><td>Image ▾</td><td>Image editing operations (rotate, flip, resize, color, etc.)</td></tr>
+    </table>
+
+    <h3>Row 2 — Sort, Size, Search</h3>
+    <table>
+      <tr><th>Control</th><th>Description</th></tr>
+      <tr><td>Sort 1 / Sort 2 / Sort 3</td><td>Up to three cascading sort criteria</td></tr>
+      <tr><td>↑ / ↓ buttons</td><td>Toggle ascending / descending for each sort level</td></tr>
+      <tr><td>Size slider</td><td>Adjust display size of thumbnails</td></tr>
+      <tr><td>Search field</td><td>Live filter thumbnails by filename or metadata</td></tr>
+      <tr><td>✕ button</td><td>Clear the search field</td></tr>
+    </table>
+  </div>
+
+  <!-- ─── TASK QUEUE ─── -->
+  <div class="section" id="task-queue">
+    <h2>Task Queue</h2>
+    <p>The task queue panel appears below the folder panel. It lists all background tasks (scans, batch jobs, etc.) with their current status.</p>
+
+    <h3>Task Panel Context Menu (right-click on a task)</h3>
+    <table>
+      <tr><th>Item</th><th>Description</th></tr>
+      <tr><td>Task Properties</td><td>View detailed information about the task</td></tr>
+      <tr><td>Pause / Resume Task</td><td>Temporarily suspend or resume the selected task</td></tr>
+      <tr><td>Quit Task</td><td>Cancel the selected task</td></tr>
+      <tr><td>Pause / Resume All Tasks</td><td>Suspend or resume all queued tasks at once</td></tr>
+      <tr><td>Quit All Tasks</td><td>Cancel all tasks</td></tr>
+      <tr><td>Show Errors / Clear Errors</td><td>View or dismiss error messages from completed tasks</td></tr>
+    </table>
+
+    <p>The task panel can be hidden via <strong>Ctrl+,</strong> → Settings → <em>Show Tasks Panel</em>.</p>
+  </div>
+
+  <!-- ─── IMAGE VIEWER ─── -->
+  <div class="section" id="viewer">
+    <h2>Image Viewer</h2>
+    <p>Double-click any thumbnail to open the full-resolution image viewer.</p>
+
+    <h3>Navigation</h3>
+    <table>
+      <tr><th>Action</th><th>Controls</th></tr>
+      <tr><td>Next image</td><td><kbd>→</kbd> or <kbd>Space</kbd></td></tr>
+      <tr><td>Previous image</td><td><kbd>←</kbd></td></tr>
+      <tr><td>Close viewer</td><td><kbd>Esc</kbd></td></tr>
+    </table>
+
+    <h3>Zoom &amp; Pan</h3>
+    <table>
+      <tr><th>Action</th><th>Controls</th></tr>
+      <tr><td>Zoom in / out</td><td>Mouse wheel up / down</td></tr>
+      <tr><td>Fit to window</td><td>Click <strong>Fit</strong> button, or press <kbd>0</kbd></td></tr>
+      <tr><td>100% zoom</td><td>Click <strong>100%</strong> button</td></tr>
+      <tr><td>Pan</td><td>Click and drag</td></tr>
+    </table>
+
+    <h3>Viewer Context Menu (right-click)</h3>
+    <table>
+      <tr><th>Item</th><th>Description</th></tr>
+      <tr><td>Metadata</td><td>Open Properties dialog for this image</td></tr>
+      <tr><td>Fit</td><td>Fit image to window</td></tr>
+      <tr><td>100%</td><td>Zoom to actual pixels</td></tr>
+      <tr><td>← Prev / Next →</td><td>Navigate to adjacent images</td></tr>
+    </table>
+  </div>
+
+  <!-- ─── SORT & SEARCH ─── -->
+  <div class="section" id="sort-search">
+    <h2>Sort &amp; Search</h2>
+
+    <h3>Sort Criteria</h3>
+    <p>The toolbar provides three cascading sort levels. Each level can be ascending or descending.</p>
+    <table>
+      <tr><th>Option</th><th>Description</th></tr>
+      <tr><td>Numeric Name</td><td>Sort by filename treating embedded numbers as numbers (e.g. img_2 before img_10). <em>Default.</em></td></tr>
+      <tr><td>Name</td><td>Alphabetical sort (lexicographic)</td></tr>
+      <tr><td>Date</td><td>Sort by the image's creation or metadata date</td></tr>
+      <tr><td>Size</td><td>Sort by file size on disk</td></tr>
+      <tr><td>Modified</td><td>Sort by last-modified timestamp on disk</td></tr>
+      <tr><td>Rating</td><td>Sort by star rating (if set)</td></tr>
+    </table>
+
+    <h3>Similarity Sort</h3>
+    <p>Select an image then click the <strong>≋</strong> (Sort by Similarity) button. The grid reorders so that visually similar images appear together. Useful for finding near-duplicates or grouped variants.</p>
+
+    <h3>Search</h3>
+    <p>Type in the search box to instantly filter the grid. The search matches against filenames and metadata fields (prompt, model, tags). Clear with the <strong>✕</strong> button or by pressing <kbd>Esc</kbd> inside the field.</p>
+  </div>
+
+  <!-- ─── METADATA OVERVIEW ─── -->
+  <div class="section" id="metadata-overview">
+    <h2>AI Metadata — Overview</h2>
+    <p>ThumbsAI reads AI generation metadata embedded in PNG files at scan time. No internet connection is needed — all parsing happens locally from the PNG <code>tEXt</code> chunk.</p>
+    <p>The following fields are extracted and stored in the database:</p>
+    <table>
+      <tr><th>Field</th><th>Description</th></tr>
+      <tr><td>Prompt</td><td>The positive text prompt used to generate the image</td></tr>
+      <tr><td>Negative Prompt</td><td>The negative prompt (things to exclude)</td></tr>
+      <tr><td>Model</td><td>Checkpoint model name or hash</td></tr>
+      <tr><td>Sampler</td><td>Sampling algorithm (Euler a, DPM++ 2M, etc.)</td></tr>
+      <tr><td>Seed</td><td>Random seed for reproducibility</td></tr>
+      <tr><td>Steps</td><td>Number of denoising steps</td></tr>
+      <tr><td>CFG Scale</td><td>Classifier-free guidance scale</td></tr>
+      <tr><td>Tags</td><td>User-defined tags (editable)</td></tr>
+      <tr><td>Source</td><td>Which generator produced the file (A1111, ComfyUI, etc.)</td></tr>
+      <tr><td>Raw Meta</td><td>The complete original metadata string for reference</td></tr>
+    </table>
+  </div>
+
+  <!-- ─── METADATA VIEW ─── -->
+  <div class="section" id="metadata-view">
+    <h2>Viewing Metadata</h2>
+    <p>There are two ways to open the metadata Properties dialog:</p>
+    <ul>
+      <li>Right-click a thumbnail → <strong>Metadata</strong></li>
+      <li>Open the image in the viewer → right-click → <strong>Metadata</strong></li>
+    </ul>
+    <p>The Properties dialog shows all stored metadata fields. If the image has not been scanned yet, the fields will be blank.</p>
+    <p>You can copy all metadata to the clipboard at once using the <strong>Copy All</strong> button — useful when pasting generation parameters into A1111 or CivitAI.</p>
+
+    <h3>Drag-to-Website</h3>
+    <p>When you drag a PNG from ThumbsAI onto a website (such as CivitAI's image upload), the <strong>original PNG file is transferred</strong> — including any embedded metadata. CivitAI and similar sites read the <code>parameters</code> chunk directly from the file, so your generation details will be recognized automatically, provided the metadata was originally written to the file (not just stored in the ThumbsAI database).</p>
+    <div class="tip"><strong>Tip</strong> If you edit metadata in ThumbsAI and click Save, the metadata is written back to the PNG file so drag-and-drop to external sites will always carry the current values.</div>
+  </div>
+
+  <!-- ─── METADATA EDIT ─── -->
+  <div class="section" id="metadata-edit">
+    <h2>Editing &amp; Saving Metadata</h2>
+    <p>In the Properties dialog, click <strong>Edit</strong> to unlock all fields. Make your changes, then click <strong>Save</strong>.</p>
+
+    <h3>What Save does</h3>
+    <ul>
+      <li><strong>Always:</strong> Writes all fields to the ThumbsAI database immediately.</li>
+      <li><strong>For PNG files:</strong> Also rewrites the <code>parameters</code> tEXt chunk in the file using the A1111 format. The write is atomic — a temporary file is written first, then renamed, so a power failure cannot corrupt the original.</li>
+      <li><strong>For JPEG, WebP, and other formats:</strong> Metadata is saved to the database only. A notice is shown confirming this. The file on disk is not modified.</li>
+    </ul>
+
+    <div class="note"><strong>Note</strong> Only the <code>parameters</code> chunk is modified. Pixel data, ICC colour profile, and all non-AI text chunks (e.g. <code>software</code>, <code>creation_time</code>) are preserved exactly as-is.</div>
+
+    <h3>Format Written</h3>
+    <p>Metadata is saved in A1111 format, which is the most widely recognised across AI tools:</p>
+    <pre>your positive prompt here
+Negative prompt: your negative prompt here
+Steps: 30, Sampler: Euler a, CFG scale: 7, Seed: 1234567890, Model: v1-5-pruned</pre>
+    <p>This format is understood by A1111, CivitAI, ComfyUI image loaders, and most other AI image tools.</p>
+  </div>
+
+  <!-- ─── METADATA FORMATS ─── -->
+  <div class="section" id="metadata-formats">
+    <h2>Supported Generator Formats</h2>
+    <table>
+      <tr><th>Generator</th><th>Detection Key</th><th>Notes</th></tr>
+      <tr><td>Automatic1111 / AUTOMATIC1111</td><td><code>parameters</code> tEXt chunk</td><td>Fully supported. Steps, sampler, CFG, seed, model, negative prompt all parsed.</td></tr>
+      <tr><td>ComfyUI</td><td><code>prompt</code> tEXt chunk (JSON node graph)</td><td>Extracts CLIPTextEncode nodes for prompts, KSampler for seed/steps/CFG, CheckpointLoader for model name.</td></tr>
+      <tr><td>NovelAI</td><td><code>Description</code> and/or <code>Comment</code> chunks</td><td>Prompt from Description; seed, sampler, steps, scale from Comment JSON.</td></tr>
+      <tr><td>InvokeAI</td><td><code>sd-metadata</code> tEXt chunk</td><td>Prompt, seed, steps, CFG, sampler, model from JSON metadata blob.</td></tr>
+    </table>
+    <p>Files from other tools without recognised metadata chunks are still indexed and displayed — the metadata fields will simply be empty.</p>
+  </div>
+
+  <!-- ─── IMAGE OPERATIONS ─── -->
+  <div class="section" id="image-ops">
+    <h2>Image Operations</h2>
+    <p>The <strong>Image ▾</strong> toolbar button provides non-destructive editing operations applied to the selected image:</p>
+    <table>
+      <tr><th>Operation</th><th>Description</th></tr>
+      <tr><td>Enlarge / Reduce</td><td>Resize the image up or down</td></tr>
+      <tr><td>Rotate 90° CW / CCW</td><td>Rotate in 90° increments</td></tr>
+      <tr><td>Rotate 180°</td><td>Flip upside-down</td></tr>
+      <tr><td>Flip Vertical / Horizontal</td><td>Mirror the image</td></tr>
+      <tr><td>Blur / Sharpen</td><td>Softness / detail enhancement</td></tr>
+      <tr><td>Color Balance</td><td>Adjust colour channels</td></tr>
+      <tr><td>Tint</td><td>Apply a color tint overlay</td></tr>
+      <tr><td>Gamma</td><td>Brightness adjustment via gamma curve</td></tr>
+      <tr><td>HSLC</td><td>Hue / Saturation / Luminance / Chroma controls</td></tr>
+      <tr><td>Denoise</td><td>Reduce noise/grain</td></tr>
+      <tr><td>Fix Compression</td><td>Re-save to reduce compression artefacts</td></tr>
+    </table>
+    <div class="warn"><strong>Warning</strong> Image operations modify the file on disk. Use <em>Save As</em> (Batch Process ▾ → Batch Save As) if you want to preserve the original.</div>
+
+    <h3>Copy / Move to Folder</h3>
+    <p>Right-click any thumbnail (or use the toolbar buttons) to copy or move files to another folder. The last 10 copy destinations and 10 move destinations are remembered for quick re-use.</p>
+  </div>
+
+  <!-- ─── PLUGINS ─── -->
+  <div class="section" id="plugins">
+    <h2>Photoshop .8bf Plugins</h2>
+    <p>ThumbsAI can apply Photoshop-compatible <code>.8bf</code> filter plugins directly to images. These are the same plugins that run in Photoshop, Affinity Photo, and similar hosts — no Photoshop installation required.</p>
+
+    <h3>Setup</h3>
+    <ol>
+      <li>Open <strong>Settings</strong> (<kbd>Ctrl+,</kbd>).</li>
+      <li>Under <em>Photoshop Plugin Directories</em>, add the folder(s) where your <code>.8bf</code> files are stored.</li>
+      <li>ThumbsAI will scan those directories and populate the <strong>Apply Filter</strong> submenu.</li>
+    </ol>
+    <p>Plugins are organised by category in the right-click menu. A Redfield plugin collection is included with ThumbsAI in the <code>plugins\Redfield\</code> folder.</p>
+
+    <h3>Included Redfield Plugins</h3>
+    <p>Fractalius, Fractalius 2, FaceControl, FineTouch, Perfectum 2, Sharpinion, SharpinionHD, SketchMaster, iEmboss, UMATRIX, and Atx.</p>
+  </div>
+
+  <!-- ─── LAUNCH APPS ─── -->
+  <div class="section" id="launch-apps">
+    <h2>Launch Apps</h2>
+    <p>Configure external applications to open images from the right-click menu under <strong>Open With</strong>.</p>
+    <ol>
+      <li>Open <strong>Settings</strong> (<kbd>Ctrl+,</kbd>) → <em>Launch Apps</em>.</li>
+      <li>Add an entry: name, path to the executable, and optional arguments. Use <code>{file}</code> as a placeholder for the image path.</li>
+    </ol>
+    <p>Common uses: open in Photoshop, load into A1111 img2img, send to your upscaler, etc.</p>
+  </div>
+
+  <!-- ─── BATCH PROCESSING ─── -->
+  <div class="section" id="batch">
+    <h2>Batch Processing</h2>
+    <p>The <strong>Batch Process ▾</strong> toolbar button provides two batch modes:</p>
+    <table>
+      <tr><th>Mode</th><th>Description</th></tr>
+      <tr><td>Batch Pipeline</td><td>Apply a chain of image operations to multiple selected images at once</td></tr>
+      <tr><td>Batch Save As</td><td>Re-save selected images to a chosen format (PNG, JPEG, WebP, BMP, TIFF) without modifying originals</td></tr>
+    </table>
+    <p>Select multiple images (hold <kbd>Ctrl</kbd> or <kbd>Shift</kbd> to multi-select) before invoking a batch operation.</p>
+  </div>
+
+  <!-- ─── SETTINGS ─── -->
+  <div class="section" id="settings">
+    <h2>Settings Reference</h2>
+    <p>Open with <kbd>Ctrl+,</kbd>. All settings are saved automatically to <code>data\settings.json</code>.</p>
+    <table>
+      <tr><th>Setting</th><th>Default</th><th>Description</th></tr>
+      <tr><td>Remember Last Folder</td><td>Off</td><td>Re-open the last visited folder on launch</td></tr>
+      <tr><td>Auto-Scan</td><td>On</td><td>Scan folder automatically when clicked in the panel</td></tr>
+      <tr><td>Confirm Delete</td><td>On</td><td>Show confirmation before sending files to Recycle Bin</td></tr>
+      <tr><td>Disabled Extensions</td><td>(none)</td><td>File types to hide (e.g. <code>.psd</code>, <code>.exr</code>)</td></tr>
+      <tr><td>Font — Folder Panel</td><td>9 px</td><td>Font size for the folder tree</td></tr>
+      <tr><td>Font — Image Grid</td><td>9 px</td><td>Font size for thumbnail filenames</td></tr>
+      <tr><td>Font — Metadata</td><td>9 px</td><td>Font size in the Properties dialog</td></tr>
+      <tr><td>Viewer Default Zoom</td><td>Fit</td><td><em>Fit</em> — fit to window on open; <em>100%</em> — open at actual size</td></tr>
+      <tr><td>Viewer Resize on Zoom</td><td>Off</td><td>Resize the viewer window when zooming in/out</td></tr>
+      <tr><td>Viewer Show Meta</td><td>Off</td><td>Open the viewer with the metadata panel already visible</td></tr>
+      <tr><td>Viewer Size Mode</td><td>Fit</td><td><em>Fit</em> — use default size; <em>Remember</em> — restore last window size</td></tr>
+      <tr><td>Viewer Width / Height</td><td>1200 × 800</td><td>Default viewer window dimensions</td></tr>
+      <tr><td>Save Format</td><td>PNG</td><td>Default format when using Save &amp; Close in the viewer</td></tr>
+      <tr><td>Preserve Metadata on Edit</td><td>On</td><td>Keep existing EXIF/PNG metadata when saving image edits</td></tr>
+      <tr><td>FFmpeg Path</td><td>(auto)</td><td>Full path to <code>ffmpeg.exe</code> for video thumbnails; leave blank to auto-detect</td></tr>
+      <tr><td>ThumbsPlus DB Path</td><td>(none)</td><td>Path to a ThumbsPlus database for import/read-only mode</td></tr>
+      <tr><td>ThumbsPlus Mode</td><td>None</td><td><em>None</em> / <em>Read-only</em> / <em>Import</em></td></tr>
+      <tr><td>Plugin Directories</td><td>(none)</td><td>Folders containing Photoshop <code>.8bf</code> plugins</td></tr>
+      <tr><td>Show Tasks Panel</td><td>On</td><td>Show/hide the background task queue panel</td></tr>
+      <tr><td>Icon Bar Order</td><td>(default)</td><td>Saved automatically when you drag-reorder toolbar buttons</td></tr>
+    </table>
+  </div>
+
+  <!-- ─── KEYBOARD SHORTCUTS ─── -->
+  <div class="section" id="shortcuts">
+    <h2>Keyboard Shortcuts</h2>
+    <table>
+      <tr><th>Shortcut</th><th>Action</th><th>Context</th></tr>
+      <tr><td><kbd>Ctrl+,</kbd></td><td>Open Settings</td><td>Main window</td></tr>
+      <tr><td><kbd>Ctrl+Q</kbd></td><td>Quit</td><td>Main window</td></tr>
+      <tr><td><kbd>→</kbd> or <kbd>Space</kbd></td><td>Next image</td><td>Image viewer</td></tr>
+      <tr><td><kbd>←</kbd></td><td>Previous image</td><td>Image viewer</td></tr>
+      <tr><td><kbd>0</kbd></td><td>Fit image to window</td><td>Image viewer</td></tr>
+      <tr><td><kbd>Esc</kbd></td><td>Exit crop mode / close viewer</td><td>Image viewer</td></tr>
+      <tr><td>Mouse wheel</td><td>Zoom in / out</td><td>Image viewer</td></tr>
+      <tr><td><kbd>Ctrl+click</kbd></td><td>Add/remove from selection</td><td>Thumbnail grid</td></tr>
+      <tr><td><kbd>Shift+click</kbd></td><td>Range-select thumbnails</td><td>Thumbnail grid</td></tr>
+      <tr><td>Double-click</td><td>Open image in viewer</td><td>Thumbnail grid</td></tr>
+    </table>
+  </div>
+
+  <!-- ─── USER DATA ─── -->
+  <div class="section" id="user-data">
+    <h2>Your Data</h2>
+    <p>All user-specific data lives in the <code>data\</code> subfolder of the ThumbsAI installation directory. <strong>Never overwrite this folder when updating.</strong></p>
+
+    <h3>File Locations</h3>
+    <table>
+      <tr><th>File</th><th>Contents</th><th>Size</th></tr>
+      <tr><td><code>data\thumbs.db</code></td><td>SQLite thumbnail cache — generated thumbnails (BLOBs) and image metadata for every scanned file</td><td>Grows with collection size; typical 1–20 GB</td></tr>
+      <tr><td><code>data\settings.json</code></td><td>All application settings including favorites list, watched folders list, launch apps, sort state, font sizes, and more</td><td>Small (a few KB)</td></tr>
+      <tr><td><code>data\launch.log</code></td><td>Startup log — timestamps of each launch and the Python interpreter used</td><td>Small</td></tr>
+      <tr><td><code>data\plugin.log</code></td><td>Plugin load/error log</td><td>Small</td></tr>
+      <tr><td><code>data\startup_error.log</code></td><td>Crash log — written only if a fatal startup error occurs</td><td>Small (or absent)</td></tr>
+    </table>
+
+    <div class="note"><strong>Watch List &amp; Favorites</strong> are stored inside <code>settings.json</code> under the keys <code>"watched_folders"</code> and <code>"favorites"</code>. There is no separate watch-list file — back up <code>settings.json</code> to preserve both.</div>
+
+    <h3>Backup &amp; Restore</h3>
+    <p>Use the provided batch scripts:</p>
+    <table>
+      <tr><th>Script</th><th>Purpose</th></tr>
+      <tr><td><code>BACKUP_DATA.bat</code></td><td>Creates a timestamped snapshot in <code>_backups\YYYY-MM-DD_HHmmss\</code>. Always backs up <code>settings.json</code>; optionally backs up <code>thumbs.db</code> (can be large).</td></tr>
+      <tr><td><code>RESTORE_DATA.bat</code></td><td>Lists available snapshots and restores selected files back to <code>data\</code>. Run with ThumbsAI closed.</td></tr>
+    </table>
+
+    <h3>Regenerating the Thumbnail Database</h3>
+    <p>If you delete <code>thumbs.db</code> or start fresh, ThumbsAI will recreate it automatically on the next launch. All previously scanned folders will appear yellow (not scanned) and will need to be re-scanned. Your <code>settings.json</code> (favorites, watched folders, etc.) is unaffected.</p>
+  </div>
+
+  <!-- ─── TROUBLESHOOTING ─── -->
+  <div class="section" id="troubleshoot">
+    <h2>Troubleshooting</h2>
+
+    <h3>App takes a long time to open</h3>
+    <p>The first launch after a system restart may take 10–30 seconds if a large database is present — SQLite performs background optimisation at startup. Subsequent launches are faster. If the app takes more than 2 minutes, check <code>data\startup_error.log</code> for errors.</p>
+
+    <h3>App says "ThumbsAI is already running"</h3>
+    <p>ThumbsAI uses a lock file (<code>~\.thumbsai.lock</code> in your home folder) to prevent duplicate instances. If the app crashed previously, the stale lock can block the next start. The lock automatically expires after 10 seconds. If the message persists, delete <code>%USERPROFILE%\.thumbsai.lock</code> manually.</p>
+
+    <h3>Folder colors are all yellow after opening</h3>
+    <p>Folder colors are populated from the database in a background thread shortly after startup. Wait a few seconds, or click the <strong>⟳</strong> button in the folder panel header to force a refresh.</p>
+
+    <h3>Thumbnails are not generating</h3>
+    <ul>
+      <li>Check that the folder is not in the <em>Disabled Extensions</em> settings list.</li>
+      <li>Check the Task Queue for errors — right-click → <strong>Show Errors</strong>.</li>
+      <li>For videos, ensure FFmpeg is installed and its path is set in Settings.</li>
+    </ul>
+
+    <h3>Metadata is empty for a PNG that was generated with A1111</h3>
+    <ul>
+      <li>Some batch or post-processing tools strip PNG metadata. Re-open the PNG in an image editor and check if <code>tEXt</code> chunks are present.</li>
+      <li>In A1111, ensure <em>Save text information about generation parameters as chunks to png files</em> is enabled in Settings → Saving images.</li>
+    </ul>
+
+    <h3>Metadata was edited but the file still shows old values when dragged to a website</h3>
+    <p>After editing in the Properties dialog, you must click <strong>Save</strong> (not just close). Save writes the updated metadata both to the database and to the PNG file on disk. Metadata stored only in the database is not embedded in the file.</p>
+
+    <h3>AVIF files are not showing</h3>
+    <p>AVIF support requires <code>pillow-avif-plugin</code>. Re-run <code>INSTALL.bat</code> to attempt installation. If it fails (usually due to a missing system C compiler), AVIF will not be available on that machine.</p>
+
+    <h3>Crash on startup — blank window or immediate close</h3>
+    <p>Check <code>data\startup_error.log</code> for the full traceback. Common causes:</p>
+    <ul>
+      <li>Python version mismatch — ensure Python 3.11+ is installed and used by the <code>.venv</code>.</li>
+      <li>Corrupted virtual environment — delete the <code>.venv\</code> folder and re-run <code>INSTALL.bat</code>.</li>
+      <li>Missing <code>PySide6</code> — re-run <code>INSTALL.bat</code>.</li>
+    </ul>
+
+    <h3>Contacting Support</h3>
+    <p>ThumbsAI is designed and maintained privately. Include the contents of <code>data\startup_error.log</code> with any bug report.</p>
+  </div>
+
+  <p style="margin-top:40px;color:var(--muted);font-size:11px;text-align:center;">
+    ThumbsAI v1.0 &nbsp;—&nbsp; Designed by Zero &nbsp;|&nbsp; Built by Jarvis
+  </p>
+
+</div><!-- #content -->
+
+<script>
+// Highlight active sidebar link on scroll
+(function(){
+  var links = document.querySelectorAll('#sidebar nav a');
+  var sections = [];
+  links.forEach(function(a){
+    var id = a.getAttribute('href').slice(1);
+    var el = document.getElementById(id);
+    if(el) sections.push({el:el, a:a});
+  });
+  function onScroll(){
+    var y = window.scrollY + 80;
+    var active = sections[0];
+    sections.forEach(function(s){
+      if(s.el.offsetTop <= y) active = s;
+    });
+    links.forEach(function(a){ a.classList.remove('active'); });
+    if(active) active.a.classList.add('active');
+  }
+  window.addEventListener('scroll', onScroll);
+  onScroll();
+})();
+</script>
+</body>
+</html>
