@@ -9,5 +9,6 @@ Thumbs.db
 *.psd
 *.zip
 push.bat
+PACK_RELEASE.bat
 _releases/
 _backups/
