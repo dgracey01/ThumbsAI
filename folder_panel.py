@@ -32,8 +32,8 @@ class _ColoredFolderModel(QFileSystemModel):
 
     def set_db(self, db) -> None:
         self._db = db
-        from PySide6.QtCore import QTimer
-        QTimer.singleShot(0, self._preload_colors)
+        # No preload here — colors are populated lazily per folder on demand
+        # and explicitly when a folder is navigated to (prime_folder).
 
     def set_favorites(self, favs: set[str]) -> None:
         self._favorites = favs
@@ -45,28 +45,66 @@ class _ColoredFolderModel(QFileSystemModel):
 
     def invalidate_cache(self) -> None:
         self._cache.clear()
-        self._preload_colors()
         self.layoutChanged.emit()
 
-    def _preload_colors(self) -> None:
+    def prime_folder(self, folder: str) -> None:
+        """
+        Load thumbnail-presence colors for `folder` and its immediate children
+        on a background thread.  Called when the user navigates to a folder so
+        the tree reflects scan state for the visible area without touching the
+        rest of the 8+ GB database.
+        """
         if self._db is None:
             return
-        try:
-            rows = self._db._c.execute(
-                "SELECT DISTINCT i.folder FROM images i "
-                "JOIN thumbnails t ON t.image_id = i.id"
-            ).fetchall()
-            folders_with_thumbs = {r[0] for r in rows}
-            for path in folders_with_thumbs:
-                self._cache[path] = _COL_HAS_THUMB
-                parent = str(Path(path).parent)
-                while parent and parent != path:
-                    if parent not in self._cache:
-                        self._cache[parent] = _COL_HAS_SUBS
-                    path = parent
-                    parent = str(Path(path).parent)
-        except Exception:
-            pass
+        import threading, sqlite3
+        from database import THUMBS_DB
+
+        # Normalise to forward-slash pattern for LIKE; Windows paths use backslash.
+        prefix = folder.rstrip("\\") + "\\"
+
+        def _bg():
+            cache_update: dict[str, QColor] = {}
+            try:
+                conn = sqlite3.connect(f"file:{THUMBS_DB}?mode=ro", uri=True)
+                conn.execute("PRAGMA cache_size=-2048")   # 2 MB — keep footprint small
+                # Exact match: this folder has thumbnails
+                row = conn.execute(
+                    "SELECT 1 FROM images i "
+                    "JOIN thumbnails t ON t.image_id = i.id "
+                    "WHERE i.folder = ? LIMIT 1",
+                    (folder,)
+                ).fetchone()
+                if row:
+                    cache_update[folder] = _COL_HAS_THUMB
+
+                # Immediate children that have thumbnails
+                rows = conn.execute(
+                    "SELECT DISTINCT i.folder FROM images i "
+                    "JOIN thumbnails t ON t.image_id = i.id "
+                    "WHERE i.folder LIKE ? ESCAPE '\\'",
+                    (prefix.replace("%", "\\%").replace("_", "\\_") + "%",)
+                ).fetchall()
+                for (child_folder,) in rows:
+                    # Only color direct children, not deep descendants
+                    rel = child_folder[len(prefix):]
+                    if "\\" not in rel:
+                        cache_update[child_folder] = _COL_HAS_THUMB
+                    # Mark the parent (folder itself) as having sub-thumbnails
+                    if folder not in cache_update:
+                        cache_update[folder] = _COL_HAS_SUBS
+                conn.close()
+            except Exception:
+                pass
+
+            if cache_update:
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(0, lambda: self._apply_cache(cache_update))
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _apply_cache(self, update: dict) -> None:
+        self._cache.update(update)
+        self.layoutChanged.emit()
 
     def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
         if role == Qt.ForegroundRole and self._db is not None:
@@ -75,8 +113,8 @@ class _ColoredFolderModel(QFileSystemModel):
                 return _COL_FAVORITE
             if path in self._watched:
                 return _COL_WATCHED
-            # _preload_colors() has already cached every folder with thumbnails.
-            # Anything not in cache has none — no DB query needed.
+            # prime_folder() caches colors for the current folder and its children.
+            # Anything not yet primed shows yellow (no data) until navigated to.
             return self._cache.get(path, _COL_NO_DATA)
         return super().data(index, role)
 
@@ -133,7 +171,8 @@ class FolderPanel(QWidget):
         self.setMinimumWidth(160)
         self.setMaximumWidth(340)
 
-        self._settings  = settings
+        self._settings      = settings
+        self._current_path  = ""
         self._favorites: set[str] = set(
             (settings.get("favorites") or []) if settings else [])
         self._watched: set[str] = set(
@@ -226,6 +265,8 @@ class FolderPanel(QWidget):
 
     def refresh_colors(self) -> None:
         self._model.invalidate_cache()
+        if self._current_path:
+            self._model.prime_folder(self._current_path)
 
     def set_font_size(self, size: int) -> None:
         self._font_size = size
@@ -234,11 +275,13 @@ class FolderPanel(QWidget):
     def navigate_to(self, path: str):
         if self._fav_mode:
             return
+        self._current_path = path
         idx = self._model.index(path)
         if idx.isValid():
             self._tree.setCurrentIndex(idx)
             self._tree.scrollTo(idx)
             self._tree.expand(idx)
+        self._model.prime_folder(path)
 
     # ── Favorites ─────────────────────────────────────────────────────────────
 
@@ -315,6 +358,8 @@ class FolderPanel(QWidget):
         else:
             path = str(Path(self._model.filePath(index)))
         if path:
+            self._current_path = path
+            self._model.prime_folder(path)
             self.folder_selected.emit(path)
 
     def _on_context_menu(self, pos):
