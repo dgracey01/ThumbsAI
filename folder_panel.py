@@ -7,15 +7,15 @@ from pathlib import Path
 from PySide6.QtWidgets import (QWidget, QFrame, QVBoxLayout, QHBoxLayout,
                                QTreeView, QLabel, QPushButton, QFileSystemModel,
                                QMenu, QCheckBox, QFileIconProvider)
-from PySide6.QtCore    import Qt, Signal, QDir, QModelIndex, QFileInfo
+from PySide6.QtCore    import Qt, Signal, QDir, QModelIndex, QFileInfo, QObject
 from PySide6.QtGui     import QColor, QStandardItemModel, QStandardItem
 
 from theme import BG, PAN, MUT, ACC, AMB, PRI, SEC, FONT, FONT_SM
 
 # Folder state colors
 _COL_NO_DATA   = QColor("#d4a43a")   # yellow  — not scanned
-_COL_HAS_THUMB = QColor("#4ca8d4")   # blue    — has thumbnails
-_COL_HAS_SUBS  = QColor("#4caf50")   # green   — has sub-folder thumbnails
+_COL_HAS_THUMB = QColor("#4caf50")   # green   — has thumbnails
+_COL_HAS_SUBS  = QColor("#4ca8d4")   # blue    — has sub-folder thumbnails
 _COL_FAVORITE  = QColor(AMB)         # amber   — favorited folder
 _COL_WATCHED   = QColor("#00bcd4")   # cyan    — always-watched folder
 
@@ -23,12 +23,15 @@ _COL_WATCHED   = QColor("#00bcd4")   # cyan    — always-watched folder
 class _ColoredFolderModel(QFileSystemModel):
     """QFileSystemModel that colours folder items based on DB thumbnail state."""
 
+    _cache_ready = Signal(object)   # dict[str, QColor] — thread-safe cache update
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._db          = None
         self._cache: dict[str, QColor] = {}
         self._favorites: set[str] = set()
         self._watched:   set[str] = set()
+        self._cache_ready.connect(self._apply_cache)
 
     def set_db(self, db) -> None:
         self._db = db
@@ -49,56 +52,67 @@ class _ColoredFolderModel(QFileSystemModel):
 
     def prime_folder(self, folder: str) -> None:
         """
-        Load thumbnail-presence colors for `folder` and its immediate children
-        on a background thread.  Called when the user navigates to a folder so
-        the tree reflects scan state for the visible area without touching the
-        rest of the 8+ GB database.
+        Load thumbnail-presence colors for `folder`, its immediate children,
+        and its parent folder — all in one background thread.  Priming the
+        parent ensures that a container folder (e.g. Movies) is colored blue
+        even when the user navigates directly to a leaf subfolder.
         """
         if self._db is None:
             return
         import threading, sqlite3
         from database import THUMBS_DB
 
-        # Normalise to forward-slash pattern for LIKE; Windows paths use backslash.
-        prefix = folder.rstrip("\\") + "\\"
+        parent = str(Path(folder).parent)
+        if parent == folder:      # drive root is its own parent — skip
+            parent = ""
+
+        def _prime_one(conn, tgt: str, cache: dict) -> None:
+            """Query DB for tgt and its direct children; update cache in place."""
+            prefix = tgt.rstrip("\\") + "\\"
+
+            # Does tgt itself have thumbnails?
+            row = conn.execute(
+                "SELECT 1 FROM images i "
+                "JOIN thumbnails t ON t.image_id = i.id "
+                "WHERE i.folder = ? LIMIT 1",
+                (tgt,)
+            ).fetchone()
+            if row:
+                cache[tgt] = _COL_HAS_THUMB
+
+            # Direct children with thumbnails (use | as LIKE escape — invalid
+            # in Windows paths so \ in the prefix stays a plain literal).
+            escaped = (prefix
+                       .replace("|", "||")
+                       .replace("%", "|%")
+                       .replace("_", "|_"))
+            rows = conn.execute(
+                "SELECT DISTINCT i.folder FROM images i "
+                "JOIN thumbnails t ON t.image_id = i.id "
+                "WHERE i.folder LIKE ? ESCAPE '|'",
+                (escaped + "%",)
+            ).fetchall()
+            for (child,) in rows:
+                rel = child[len(prefix):]
+                if "\\" not in rel:
+                    cache[child] = _COL_HAS_THUMB
+                if tgt not in cache:
+                    cache[tgt] = _COL_HAS_SUBS
 
         def _bg():
             cache_update: dict[str, QColor] = {}
             try:
-                conn = sqlite3.connect(f"file:{THUMBS_DB}?mode=ro", uri=True)
-                conn.execute("PRAGMA cache_size=-2048")   # 2 MB — keep footprint small
-                # Exact match: this folder has thumbnails
-                row = conn.execute(
-                    "SELECT 1 FROM images i "
-                    "JOIN thumbnails t ON t.image_id = i.id "
-                    "WHERE i.folder = ? LIMIT 1",
-                    (folder,)
-                ).fetchone()
-                if row:
-                    cache_update[folder] = _COL_HAS_THUMB
-
-                # Immediate children that have thumbnails
-                rows = conn.execute(
-                    "SELECT DISTINCT i.folder FROM images i "
-                    "JOIN thumbnails t ON t.image_id = i.id "
-                    "WHERE i.folder LIKE ? ESCAPE '\\'",
-                    (prefix.replace("%", "\\%").replace("_", "\\_") + "%",)
-                ).fetchall()
-                for (child_folder,) in rows:
-                    # Only color direct children, not deep descendants
-                    rel = child_folder[len(prefix):]
-                    if "\\" not in rel:
-                        cache_update[child_folder] = _COL_HAS_THUMB
-                    # Mark the parent (folder itself) as having sub-thumbnails
-                    if folder not in cache_update:
-                        cache_update[folder] = _COL_HAS_SUBS
+                conn = sqlite3.connect(str(THUMBS_DB), check_same_thread=False)
+                conn.execute("PRAGMA query_only = ON")
+                conn.execute("PRAGMA cache_size=-2048")
+                _prime_one(conn, folder, cache_update)
+                if parent:
+                    _prime_one(conn, parent, cache_update)
                 conn.close()
             except Exception:
                 pass
-
             if cache_update:
-                from PySide6.QtCore import QTimer
-                QTimer.singleShot(0, lambda: self._apply_cache(cache_update))
+                self._cache_ready.emit(cache_update)
 
         threading.Thread(target=_bg, daemon=True).start()
 
@@ -108,7 +122,7 @@ class _ColoredFolderModel(QFileSystemModel):
 
     def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
         if role == Qt.ForegroundRole and self._db is not None:
-            path = self.filePath(index)
+            path = str(Path(self.filePath(index)))   # normalize to OS backslashes
             if path in self._favorites:
                 return _COL_FAVORITE
             if path in self._watched:

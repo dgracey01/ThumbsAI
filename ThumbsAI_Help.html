@@ -339,8 +339,8 @@ kbd{
     <table>
       <tr><th>Color</th><th>Meaning</th></tr>
       <tr><td><span class="pill pill-yellow">Yellow</span></td><td>Folder has not been scanned yet — no thumbnails in the database</td></tr>
-      <tr><td><span class="pill pill-blue">Blue</span></td><td>Folder has been scanned and has thumbnails in the database</td></tr>
-      <tr><td><span class="pill pill-green">Green</span></td><td>A sub-folder of this folder has thumbnails (this folder itself may not)</td></tr>
+      <tr><td><span class="pill pill-green">Green</span></td><td>Folder has been scanned and has direct thumbnails in the database</td></tr>
+      <tr><td><span class="pill pill-blue">Blue</span></td><td>A sub-folder of this folder has thumbnails (this folder itself may not)</td></tr>
       <tr><td><span class="pill pill-amber">Amber</span></td><td>This folder is in your Favorites list</td></tr>
       <tr><td><span class="pill pill-cyan">Cyan</span></td><td>This folder is in the Always-Watch list</td></tr>
     </table>
@@ -513,6 +513,17 @@ kbd{
       <tr><td>100%</td><td>Zoom to actual pixels</td></tr>
       <tr><td>← Prev / Next →</td><td>Navigate to adjacent images</td></tr>
     </table>
+
+    <h3>Metadata Panel</h3>
+    <p>Click the <strong>Meta</strong> button in the viewer toolbar to open a collapsible panel on the right side. It shows the source badge, dimensions, file path, prompt, negative prompt, and all generation parameters for the current image — updating automatically as you navigate.</p>
+    <h4>Editing from the Metadata Panel</h4>
+    <p>At the bottom of the panel is an <strong>Edit</strong> button. Click it to unlock all fields (highlighted with a blue border). After making changes click <strong>Save</strong> — the button label reflects the current mode — to commit:</p>
+    <ul>
+      <li>All fields are written to the ThumbsAI database immediately.</li>
+      <li>For PNG files the <code>parameters</code> tEXt chunk is also rewritten in A1111 format (atomic write — original is never left in a corrupt state).</li>
+      <li>For JPEG, WebP, and other formats only the database is updated; a notice confirms this.</li>
+      <li>Navigating to another image while editing cancels the edit without saving.</li>
+    </ul>
   </div>
 
   <!-- ─── SORT & SEARCH ─── -->
@@ -561,10 +572,16 @@ kbd{
   <!-- ─── METADATA VIEW ─── -->
   <div class="section" id="metadata-view">
     <h2>Viewing Metadata</h2>
-    <p>There are two ways to open the metadata Properties dialog:</p>
+    <p>There are two ways to access metadata:</p>
+
+    <h3>Meta Panel (Viewer)</h3>
+    <p>Open the image in the viewer and click the <strong>Meta</strong> button in the toolbar. The panel slides in on the right and shows all metadata fields for the current image, updating automatically as you navigate. The panel also contains an <strong>Edit / Save</strong> button — see the Image Viewer section for details.</p>
+
+    <h3>Properties Dialog</h3>
+    <p>Open the full Properties dialog via:</p>
     <ul>
       <li>Right-click a thumbnail → <strong>Metadata</strong></li>
-      <li>Open the image in the viewer → right-click → <strong>Metadata</strong></li>
+      <li>Inside the viewer → right-click → <strong>Metadata</strong></li>
     </ul>
     <p>The Properties dialog shows all stored metadata fields. If the image has not been scanned yet, the fields will be blank.</p>
     <p>You can copy all metadata to the clipboard at once using the <strong>Copy All</strong> button — useful when pasting generation parameters into A1111 or CivitAI.</p>
@@ -577,7 +594,12 @@ kbd{
   <!-- ─── METADATA EDIT ─── -->
   <div class="section" id="metadata-edit">
     <h2>Editing &amp; Saving Metadata</h2>
-    <p>In the Properties dialog, click <strong>Edit</strong> to unlock all fields. Make your changes, then click <strong>Save</strong>.</p>
+    <p>Metadata can be edited from two places:</p>
+    <ul>
+      <li><strong>Meta Panel</strong> — click <strong>Meta</strong> in the viewer toolbar, then click <strong>Edit</strong> at the bottom of the panel.</li>
+      <li><strong>Properties Dialog</strong> — right-click a thumbnail or the viewer → <strong>Metadata</strong>, then click <strong>Edit</strong>.</li>
+    </ul>
+    <p>In both cases, click <strong>Edit</strong> to unlock all fields. Make your changes, then click <strong>Save</strong>.</p>
 
     <h3>What Save does</h3>
     <ul>
@@ -689,6 +711,8 @@ Steps: 30, Sampler: Euler a, CFG scale: 7, Seed: 1234567890, Model: v1-5-pruned<
       <tr><td>Viewer Default Zoom</td><td>Fit</td><td><em>Fit</em> — fit to window on open; <em>100%</em> — open at actual size</td></tr>
       <tr><td>Viewer Resize on Zoom</td><td>Off</td><td>Resize the viewer window when zooming in/out</td></tr>
       <tr><td>Viewer Show Meta</td><td>Off</td><td>Open the viewer with the metadata panel already visible</td></tr>
+      <tr><td>Display on Same Monitor</td><td>On</td><td>Open the image viewer on the same monitor as the main ThumbsAI window rather than the system default</td></tr>
+      <tr><td>Row Preloading</td><td>4 rows</td><td>Number of thumbnail rows pre-loaded above and below the visible viewport. Higher values reduce loading flicker during fast scrolling but use more RAM.</td></tr>
       <tr><td>Viewer Size Mode</td><td>Fit</td><td><em>Fit</em> — use default size; <em>Remember</em> — restore last window size</td></tr>
       <tr><td>Viewer Width / Height</td><td>1200 × 800</td><td>Default viewer window dimensions</td></tr>
       <tr><td>Save Format</td><td>PNG</td><td>Default format when using Save &amp; Close in the viewer</td></tr>
@@ -776,7 +800,7 @@ Steps: 30, Sampler: Euler a, CFG scale: 7, Seed: 1234567890, Model: v1-5-pruned<
     </ul>
 
     <h3>Metadata was edited but the file still shows old values when dragged to a website</h3>
-    <p>After editing in the Properties dialog, you must click <strong>Save</strong> (not just close). Save writes the updated metadata both to the database and to the PNG file on disk. Metadata stored only in the database is not embedded in the file.</p>
+    <p>You must click <strong>Save</strong> after editing — either in the Meta panel or the Properties dialog. Save writes the updated metadata both to the database and to the PNG file on disk. Metadata stored only in the database is not embedded in the file. Simply closing the dialog or navigating away discards unsaved changes.</p>
 
     <h3>AVIF files are not showing</h3>
     <p>AVIF support requires <code>pillow-avif-plugin</code>. Re-run <code>INSTALL.bat</code> to attempt installation. If it fails (usually due to a missing system C compiler), AVIF will not be available on that machine.</p>

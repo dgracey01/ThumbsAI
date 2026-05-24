@@ -69,8 +69,8 @@ and lets you browse, search, sort, and organize thousands of images without any 
 | Color | Meaning |
 |-------|---------|
 | 🟡 Yellow | Not scanned yet |
-| 🔵 Blue | Scanned — has thumbnails |
-| 🟢 Green | A sub-folder has thumbnails |
+| 🟢 Green | Has direct thumbnails in this folder |
+| 🔵 Blue | A sub-folder has thumbnails (this folder may not) |
 | 🟠 Amber | Favorited folder |
 | 🩵 Cyan | Always-watched folder |
 

@@ -34,9 +34,11 @@ _DEFAULTS: dict = {
     "icon_bar_order": [],
 
     # Image Viewer
+    "pool_buffer":             4,          # rows pre-loaded above/below viewport
     "viewer_default_zoom":     "fit",      # "fit" | "100"
     "viewer_resize_on_zoom":   False,      # resize window to fit image on zoom
     "viewer_show_meta":        False,      # open with metadata panel visible
+    "viewer_same_monitor":     True,       # open viewer on same monitor as main window
     "viewer_remember_size":    False,
     "viewer_width":            1200,
     "viewer_height":           800,

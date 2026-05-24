@@ -408,7 +408,7 @@ THUMB_PADDING  = 12    # px around image inside card
 LABEL_HEIGHT   = 46    # px for filename + info text below image
 CARD_GAP       = 6     # spacing between cards (px)
 CARD_MARGIN    = 6     # outer grid margin (px)
-POOL_BUFFER    = 2     # extra rows above/below viewport kept in pool
+POOL_BUFFER    = 4     # default extra rows above/below viewport (overridden by settings)
 MAX_CACHE_PX   = 256   # max decoded QPixmaps held in LRU cache
 
 SOURCE_COLORS = {
@@ -1239,8 +1239,10 @@ class ImageViewer(QMainWindow):
         vl.addWidget(self._f_neg)
 
         # Compact key-value pairs
-        self._kv_labels:     dict[str, QLabel] = {}
-        self._kv_key_labels: dict[str, QLabel] = {}
+        self._kv_labels:     dict[str, QLineEdit] = {}
+        self._kv_key_labels: dict[str, QLabel]    = {}
+        _kv_ro = (f"QLineEdit{{color:{PRI};font-size:{fs}px;"
+                  f"background:transparent;border:none;padding:0px;}}")
         for key in ("Model", "Sampler", "Seed", "Steps", "CFG Scale"):
             row_w = QWidget(w)
             rh = QHBoxLayout(row_w)
@@ -1250,15 +1252,30 @@ class ImageViewer(QMainWindow):
             k_lbl.setFixedWidth(70)
             k_lbl.setStyleSheet(
                 f"color:{SEC};font-size:{fs}px;background:transparent;")
-            v_lbl = QLabel("", row_w)
-            v_lbl.setWordWrap(True)
-            v_lbl.setStyleSheet(
-                f"color:{PRI};font-size:{fs}px;background:transparent;")
+            v_edit = QLineEdit("", row_w)
+            v_edit.setReadOnly(True)
+            v_edit.setFrame(False)
+            v_edit.setStyleSheet(_kv_ro)
             rh.addWidget(k_lbl)
-            rh.addWidget(v_lbl, stretch=1)
+            rh.addWidget(v_edit, stretch=1)
             vl.addWidget(row_w)
-            self._kv_labels[key]     = v_lbl
+            self._kv_labels[key]     = v_edit
             self._kv_key_labels[key] = k_lbl
+
+        # ── Edit / Save button ────────────────────────────────────────────────
+        self._meta_edit_mode = False
+        self._btn_meta_edit = QPushButton("Edit", w)
+        self._btn_meta_edit.setFixedHeight(26)
+        self._btn_meta_edit.setEnabled(self._db is not None)
+        self._btn_meta_edit.setStyleSheet(
+            f"QPushButton{{background:#2a5a2a;color:{PRI};border:none;"
+            f"border-radius:4px;padding:0 12px;"
+            f"font-family:{FONT};font-size:{FONT_SM}px;font-weight:bold;}}"
+            f"QPushButton:hover{{background:#336633;}}"
+            f"QPushButton:disabled{{background:{MUT};color:#666688;}}")
+        self._btn_meta_edit.clicked.connect(self._on_meta_edit)
+        vl.addSpacing(6)
+        vl.addWidget(self._btn_meta_edit)
 
         vl.addStretch()
         scroll.setWidget(w)
@@ -1273,7 +1290,8 @@ class ImageViewer(QMainWindow):
         dim_ss  = f"color:{SEC};font-size:{size}px;"
         file_ss = f"color:{MUT};font-size:{size}px;"
         kk_ss   = f"color:{SEC};font-size:{size}px;background:transparent;"
-        kv_ss   = f"color:{PRI};font-size:{size}px;background:transparent;"
+        kv_ss   = (f"QLineEdit{{color:{PRI};font-size:{size}px;"
+                   f"background:transparent;border:none;padding:0px;}}")
         self._meta_dim.setStyleSheet(dim_ss)
         self._meta_file.setStyleSheet(file_ss)
         self._meta_lbl_prompt.setStyleSheet(hdr_ss)
@@ -1282,8 +1300,9 @@ class ImageViewer(QMainWindow):
         self._f_neg.setStyleSheet(txt_ss)
         for k_lbl in self._kv_key_labels.values():
             k_lbl.setStyleSheet(kk_ss)
-        for v_lbl in self._kv_labels.values():
-            v_lbl.setStyleSheet(kv_ss)
+        if not self._meta_edit_mode:
+            for v_edit in self._kv_labels.values():
+                v_edit.setStyleSheet(kv_ss)
 
     @staticmethod
     def _load_pixmap(fp: str) -> QPixmap:
@@ -1344,6 +1363,10 @@ class ImageViewer(QMainWindow):
         self._title_lbl.setText(
             f"{Path(fp).name}   [{self._idx+1} / {n}]")
 
+        # Cancel any in-progress metadata edit when switching images
+        if self._meta_edit_mode:
+            self._exit_meta_edit()
+
         # Populate metadata panel
         src   = row.get("source", "") or ""
         color = SOURCE_COLORS.get(src, ACC)
@@ -1367,8 +1390,82 @@ class ImageViewer(QMainWindow):
         self._kv_labels["Steps"].setText(row.get("steps", "") or "")
         self._kv_labels["CFG Scale"].setText(row.get("cfg_scale", "") or "")
 
+    # ── Metadata panel edit/save ─────────────────────────────────────────────
+
+    def _on_meta_edit(self):
+        if not self._meta_edit_mode:
+            self._enter_meta_edit()
+        else:
+            self._save_meta()
+
+    def _enter_meta_edit(self):
+        self._meta_edit_mode = True
+        fs = self._font_meta
+        active_te = (f"background:{BG};color:{PRI};border:1px solid {ACC};"
+                     f"border-radius:4px;font-family:{FONT};font-size:{fs}px;padding:4px;")
+        active_le = (f"QLineEdit{{color:{PRI};font-size:{fs}px;background:{BG};"
+                     f"border:1px solid {ACC};border-radius:4px;padding:2px 4px;}}")
+        self._f_prompt.setReadOnly(False)
+        self._f_prompt.setStyleSheet(active_te)
+        self._f_neg.setReadOnly(False)
+        self._f_neg.setStyleSheet(active_te)
+        for v_edit in self._kv_labels.values():
+            v_edit.setReadOnly(False)
+            v_edit.setStyleSheet(active_le)
+        self._btn_meta_edit.setText("Save")
+
+    def _exit_meta_edit(self):
+        self._meta_edit_mode = False
+        fs = self._font_meta
+        ro_te = (f"background:{BG};color:{PRI};border:1px solid {MUT};"
+                 f"border-radius:4px;font-family:{FONT};font-size:{fs}px;padding:4px;")
+        ro_le = (f"QLineEdit{{color:{PRI};font-size:{fs}px;"
+                 f"background:transparent;border:none;padding:0px;}}")
+        self._f_prompt.setReadOnly(True)
+        self._f_prompt.setStyleSheet(ro_te)
+        self._f_neg.setReadOnly(True)
+        self._f_neg.setStyleSheet(ro_te)
+        for v_edit in self._kv_labels.values():
+            v_edit.setReadOnly(True)
+            v_edit.setStyleSheet(ro_le)
+        self._btn_meta_edit.setText("Edit")
+
+    def _save_meta(self):
+        if not self._images or self._db is None:
+            return
+        row = self._images[self._idx]
+        fp  = row.get("filepath", "")
+        if not fp:
+            return
+        data = {
+            "prompt":          self._f_prompt.toPlainText(),
+            "negative_prompt": self._f_neg.toPlainText(),
+            "model":           self._kv_labels["Model"].text(),
+            "sampler":         self._kv_labels["Sampler"].text(),
+            "seed":            self._kv_labels["Seed"].text(),
+            "steps":           self._kv_labels["Steps"].text(),
+            "cfg_scale":       self._kv_labels["CFG Scale"].text(),
+        }
+        self._db.upsert(fp, **data)
+        row.update(data)
+        from ai_metadata import write_metadata_to_file
+        warning = write_metadata_to_file(fp, data)
+        self._exit_meta_edit()
+        if warning:
+            from PySide6.QtWidgets import QMessageBox
+            mb = QMessageBox(self)
+            mb.setWindowTitle("Metadata")
+            mb.setIcon(QMessageBox.Icon.Information)
+            mb.setText("Saved to database.")
+            mb.setInformativeText(warning)
+            mb.exec()
+
+    def _current_screen(self):
+        s = self.screen()
+        return (s if s else QApplication.primaryScreen()).availableGeometry()
+
     def _center_on_screen(self):
-        screen = QApplication.primaryScreen().availableGeometry()
+        screen = self._current_screen()
         geo    = self.frameGeometry()
         geo.moveCenter(screen.center())
         self.move(geo.topLeft())
@@ -1381,7 +1478,7 @@ class ImageViewer(QMainWindow):
         if not self._view._item:
             return
         img_w, img_h = self._view.display_size()
-        screen   = QApplication.primaryScreen().availableGeometry()
+        screen   = self._current_screen()
         chrome_h = 36 + 4   # toolbar row + small margin
         meta_w   = 320 if self._meta_panel.isVisible() else 0
         max_w    = screen.width()  - 40
@@ -1456,7 +1553,7 @@ class ImageViewer(QMainWindow):
         self._sync_splitter()
 
     def _resize_by(self, delta: int):
-        screen = QApplication.primaryScreen().availableGeometry()
+        screen = self._current_screen()
         new_w  = max(480, min(self.width() + delta, screen.width() - 40))
         cx     = self.frameGeometry().center().x()
         self.resize(new_w, self.height())
@@ -2685,6 +2782,8 @@ class _DbThumbLoader(QRunnable):
         data = self._db.get_thumbnail(self._filepath)
         if data:
             self._row["thumbnail"] = data   # cache for future scrolls
+        else:
+            self._row["thumbnail"] = b""    # sentinel: checked — no thumbnail in DB
         img = QImage()
         if data and img.loadFromData(data):
             img = img.scaled(self._size, self._size,
@@ -2722,6 +2821,8 @@ class ThumbGrid(QWidget):
         self._enabled_exts = set(SUPPORTED_EXTS)
         self._plugins:         list              = []   # PluginInfo list, populated by rescan_plugins()
         # ── Virtual scroll state ──────────────────────────────────────────────
+        self._pool_buffer:     int               = int(
+            (settings.get("pool_buffer") or POOL_BUFFER) if settings else POOL_BUFFER)
         self._rows:            list[dict]        = []
         self._selected_fps:    set[str]          = set()
         self._anchor_fp:       str | None        = None
@@ -3038,6 +3139,10 @@ class ThumbGrid(QWidget):
         if self._folder:
             self.load_folder(self._folder)
 
+    def set_pool_buffer(self, rows: int):
+        self._pool_buffer = max(1, rows)
+        self._rebuild_pool()
+
     def set_font_image(self, size: int):
         self._font_image = size
         for card in self._card_pool:
@@ -3325,7 +3430,7 @@ class ThumbGrid(QWidget):
 
         # Pool size: visible rows + buffer above and below
         visible_rows = max(1, (vp_h + row_h - 1) // row_h)
-        pool_rows    = visible_rows + 2 * POOL_BUFFER
+        pool_rows    = visible_rows + 2 * self._pool_buffer
         target_size  = pool_rows * cols
 
         # Rebuild pool widgets if column count changed
@@ -3373,7 +3478,7 @@ class ThumbGrid(QWidget):
 
         scroll_y       = self._scroll.verticalScrollBar().value()
         first_vis_row  = max(0, scroll_y // row_h)
-        first_pool_row = max(0, first_vis_row - POOL_BUFFER)
+        first_pool_row = max(0, first_vis_row - self._pool_buffer)
         self._first_pool_idx = first_pool_row * cols
 
         _queued: set[str] = set()
@@ -3398,7 +3503,8 @@ class ThumbGrid(QWidget):
 
             # Serve decoded pixmap from LRU cache or queue a decode job
             fp_ext = Path(fp).suffix.lower() if fp else ""
-            is_video_no_thumb = fp_ext in VIDEO_EXTS and not row.get("thumbnail")
+            # None = not yet checked; b"" = confirmed no thumbnail in DB (sentinel)
+            is_video_no_thumb = fp_ext in VIDEO_EXTS and row.get("thumbnail") == b""
             can_display = fp and fp_ext != ".safetensors" and not is_video_no_thumb
             if can_display:
                 if fp in self._px_cache:
@@ -3498,7 +3604,7 @@ class ThumbGrid(QWidget):
         _, card_h = self._card_size()
         row_h     = card_h + CARD_GAP
         cols      = self._pool_cols or 1
-        new_first_pool = max(0, (value // row_h) - POOL_BUFFER) * cols
+        new_first_pool = max(0, (value // row_h) - self._pool_buffer) * cols
         if new_first_pool != self._first_pool_idx:
             self._assign_pool()
 
@@ -3688,6 +3794,18 @@ class ThumbGrid(QWidget):
                                  if viewer in self._viewers else None)
         self._viewers.append(viewer)
         viewer.show()
+        if self._settings and self._settings.get("viewer_same_monitor", True):
+            app_screen = self.window().screen()
+            if app_screen:
+                from PySide6.QtCore import QTimer
+                def _reposition(v=viewer, s=app_screen):
+                    fg = v.frameGeometry()
+                    fg.moveCenter(s.geometry().center())
+                    v.move(fg.topLeft())
+                    v.raise_()
+                    v.activateWindow()
+                QTimer.singleShot(0, _reposition)
+                return
         viewer.raise_()
         viewer.activateWindow()
 

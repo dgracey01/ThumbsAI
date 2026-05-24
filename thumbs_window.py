@@ -988,6 +988,8 @@ class _ImportProgressDialog(QDialog):
 
 class ThumbsWindow(QMainWindow):
 
+    _bg_status = Signal(str)   # thread-safe status update from background workers
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ThumbsAI")
@@ -1393,6 +1395,8 @@ class ThumbsWindow(QMainWindow):
 
         self._splitter.addWidget(left_widget)
 
+        self._bg_status.connect(self._on_status)
+
         self._grid = ThumbGrid(self._db, self._settings)
         self._grid.status_changed.connect(self._on_status)
         self._grid.scan_finished.connect(self._folder_panel.refresh_colors)
@@ -1635,25 +1639,39 @@ class ThumbsWindow(QMainWindow):
         if not self._current_folder:
             self._on_status("No folder selected")
             return
-        removed = self._db.delete_missing(self._current_folder)
-        word    = "entry" if removed == 1 else "entries"
-        self._on_status(f"Removed {removed} orphan DB {word}")
-        if removed:
-            self._grid.refresh()
+        self._on_status("Removing orphans…")
+        folder = self._current_folder
+        def _run():
+            removed = self._db.delete_missing(folder)
+            word = "entry" if removed == 1 else "entries"
+            self._bg_status.emit(f"Removed {removed} orphan DB {word}")
+            if removed:
+                QTimer.singleShot(0, self._grid.refresh)
+        import threading
+        threading.Thread(target=_run, daemon=True).start()
 
     def _on_scan_disk(self):
         folders = self._db.all_folders()
         self._grid.scan_all_folders(folders)
 
     def _on_remove_orphans_disk(self):
-        folders = self._db.all_folders()
-        total   = sum(self._db.delete_missing(f) for f in folders)
-        word    = "entry" if total == 1 else "entries"
-        nf      = len(folders)
-        self._on_status(
-            f"Removed {total} orphan DB {word} across {nf} folder{'s' if nf != 1 else ''}")
-        if total and self._current_folder:
-            self._grid.refresh()
+        self._on_status("Scanning all folders for orphans…")
+        def _run():
+            folders = self._db.all_folders()
+            nf      = len(folders)
+            total   = 0
+            for i, f in enumerate(folders, 1):
+                total += self._db.delete_missing(f)
+                if i % 10 == 0:
+                    self._bg_status.emit(
+                        f"Orphan scan: {i}/{nf} folders checked, {total} removed so far…")
+            word = "entry" if total == 1 else "entries"
+            self._bg_status.emit(
+                f"Removed {total} orphan DB {word} across {nf} folder{'s' if nf != 1 else ''}")
+            if total:
+                QTimer.singleShot(0, self._grid.refresh)
+        import threading
+        threading.Thread(target=_run, daemon=True).start()
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -1780,6 +1798,8 @@ class ThumbsWindow(QMainWindow):
             int(self._settings.get("font_image") or 9))
         self._grid.set_font_meta(
             int(self._settings.get("font_meta") or 9))
+        self._grid.set_pool_buffer(
+            int(self._settings.get("pool_buffer") or 4))
 
     def _bg_optimize(self):
         """Run PRAGMA optimize + WAL checkpoint on a background thread."""
@@ -2626,6 +2646,13 @@ class _SettingsDialog(QDialog):
         self._chk_resize_on_zoom.setStyleSheet(_CHK_STYLE())
         vl.addWidget(self._chk_resize_on_zoom)
 
+        # Monitor placement
+        self._chk_same_monitor = QCheckBox("Display images on same monitor as application")
+        self._chk_same_monitor.setChecked(
+            bool(self._settings.get("viewer_same_monitor", True)))
+        self._chk_same_monitor.setStyleSheet(_CHK_STYLE())
+        vl.addWidget(self._chk_same_monitor)
+
         # Metadata panel
         self._section_label(vl, "Metadata Panel")
         self._chk_show_meta = QCheckBox("Open with metadata panel visible")
@@ -2685,6 +2712,34 @@ class _SettingsDialog(QDialog):
         if idx >= 0:
             self._save_fmt_combo.setCurrentIndex(idx)
         vl.addWidget(self._save_fmt_combo)
+
+        # Row Preloading
+        self._section_label(vl, "Row Preloading")
+        preload_desc = QLabel(
+            "Rows of thumbnails buffered above and below the visible area.\n"
+            "Higher values reduce blank flashes while scrolling fast.\n"
+            "Warning: more rows require more RAM.")
+        preload_desc.setStyleSheet(
+            f"color:{SEC};font-size:{FONT_SM}px;background:transparent;")
+        preload_desc.setWordWrap(True)
+        vl.addWidget(preload_desc)
+
+        _spin_ss = (
+            f"QSpinBox{{background:{CAR};color:{PRI};"
+            f"border:2px solid {MUT};border-radius:6px;"
+            f"padding:4px 8px;font-family:{FONT};font-size:{FONT_MD}px;"
+            f"min-height:28px;min-width:80px;}}"
+            f"QSpinBox:focus{{border-color:{ACC};}}"
+            f"QSpinBox::up-button,QSpinBox::down-button{{"
+            f"border:none;width:18px;background:{MUT};}}"
+            f"QSpinBox::up-button:hover,QSpinBox::down-button:hover{{background:{ACC};}}")
+        self._spin_pool_buffer = QSpinBox()
+        self._spin_pool_buffer.setStyleSheet(_spin_ss)
+        self._spin_pool_buffer.setRange(1, 20)
+        self._spin_pool_buffer.setValue(
+            int(self._settings.get("pool_buffer") or 4))
+        self._spin_pool_buffer.setSuffix("  rows")
+        vl.addWidget(self._spin_pool_buffer)
 
         vl.addStretch()
 
@@ -2868,10 +2923,14 @@ class _SettingsDialog(QDialog):
                            "100" if self._radio_100.isChecked() else "fit")
         self._settings.set("viewer_resize_on_zoom",
                            self._chk_resize_on_zoom.isChecked())
+        self._settings.set("viewer_same_monitor",
+                           self._chk_same_monitor.isChecked())
         self._settings.set("viewer_show_meta",
                            self._chk_show_meta.isChecked())
         self._settings.set("viewer_save_format",
                            self._save_fmt_combo.currentData())
+        self._settings.set("pool_buffer",
+                           self._spin_pool_buffer.value())
         self._settings.set("thumbsplus_db_path",
                            self._tp_path_edit.text().strip())
         if self._radio_db_readonly.isChecked():
