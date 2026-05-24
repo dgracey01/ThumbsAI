@@ -2127,7 +2127,7 @@ class ThumbCard(QFrame):
         self._img.setFixedSize(thumb_size, thumb_size)
         self._img.setAlignment(Qt.AlignCenter)
         if fp_ext == ".safetensors":
-            self._render_safetensors(row.get("filepath", ""), thumb_size)
+            self._render_safetensors_async(row.get("filepath", ""), thumb_size)
         elif fp_ext in VIDEO_EXTS and not row.get("thumbnail"):
             self._render_video(fp_ext, thumb_size)   # no frame extracted — filmstrip
         elif defer_thumb:
@@ -2185,10 +2185,36 @@ class ThumbCard(QFrame):
         p.end()
         self._img.setPixmap(px)
 
-    def _render_safetensors(self, filepath: str, size: int):
-        """Draw safetensors metadata summary into self._img."""
-        meta = _read_safetensors_meta(filepath)
-        px   = QPixmap(size, size)
+    def _render_safetensors_async(self, filepath: str, size: int):
+        """Show a placeholder immediately, then read the file header on a background thread."""
+        import threading, weakref
+        self._safetensors_fp = filepath   # track current file; guards stale callbacks
+
+        # Placeholder
+        px = QPixmap(size, size)
+        px.fill(QColor(BG))
+        p = QPainter(px)
+        p.setPen(QColor(MUT))
+        p.setFont(QFont(FONT, max(7, FONT_SM - 1)))
+        p.drawText(px.rect(), Qt.AlignCenter, ".safetensors")
+        p.end()
+        self._img.setPixmap(px)
+
+        ref = weakref.ref(self)
+        def _bg():
+            meta = _read_safetensors_meta(filepath)
+            from PySide6.QtCore import QTimer
+            def _apply():
+                card = ref()
+                # Guard: card destroyed or reassigned to a different file
+                if card is not None and getattr(card, "_safetensors_fp", None) == filepath:
+                    card._render_safetensors_finish(meta, size)
+            QTimer.singleShot(0, _apply)
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _render_safetensors_finish(self, meta: str, size: int):
+        """Draw the metadata text returned by the background read — runs on main thread."""
+        px = QPixmap(size, size)
         px.fill(QColor(BG))
         p = QPainter(px)
         p.setPen(QColor(PRI))
@@ -2259,7 +2285,7 @@ class ThumbCard(QFrame):
 
         # Image area
         if fp_ext == ".safetensors":
-            self._render_safetensors(fp, size)
+            self._render_safetensors_async(fp, size)
         elif fp_ext in VIDEO_EXTS and not row.get("thumbnail"):
             self._render_video(fp_ext, size)
         else:
