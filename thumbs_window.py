@@ -1401,6 +1401,7 @@ class ThumbsWindow(QMainWindow):
         self._grid.status_changed.connect(self._on_status)
         self._grid.scan_finished.connect(self._folder_panel.refresh_colors)
         self._grid.task_list_changed.connect(self._tasks_panel.update_tasks)
+        self._grid.folder_loaded.connect(self._merge_thumbsplus_rows)
         self._tasks_panel.quit_task.connect(self._grid.cancel_task)
         self._tasks_panel.quit_all_tasks.connect(self._grid.cancel_all_tasks)
         self._splitter.addWidget(self._grid)
@@ -1441,15 +1442,9 @@ class ThumbsWindow(QMainWindow):
         self._search_edit.blockSignals(False)
         self._current_folder = path
         self._grid.load_folder(path)
-
-        # Merge ThumbsPlus images not already in ThumbsAI (Read Only mode)
-        if (self._settings.get("thumbsplus_mode") == "readonly"
-                and self._tp_reader is not None):
-            ai_paths = set(self._db.cached_filepaths(path).keys())
-            tp_rows  = self._tp_reader.images_in_folder(path)
-            extra    = [r for r in tp_rows if r["filepath"] not in ai_paths]
-            if extra:
-                self._grid.append_rows(extra)
+        # ThumbsPlus Read-Only merge runs in _merge_thumbsplus_rows, fired by the
+        # grid's folder_loaded signal once the async DB load completes (so the
+        # merged rows aren't overwritten by the load result).
 
         if self._settings.get("remember_last_folder"):
             self._settings.set("last_folder", path)
@@ -1462,6 +1457,19 @@ class ThumbsWindow(QMainWindow):
         # Defer watcher rebuild so the folder renders before the blocking
         # iterdir() + addPaths() calls freeze the event loop.
         QTimer.singleShot(0, lambda p=path: self._update_watcher(p))
+
+    def _merge_thumbsplus_rows(self, folder: str):
+        """Merge ThumbsPlus images not already in ThumbsAI (Read Only mode).
+        Fired by ThumbGrid.folder_loaded once the async folder load completes,
+        so the appended rows are not overwritten by the load result."""
+        if (self._settings.get("thumbsplus_mode") != "readonly"
+                or self._tp_reader is None):
+            return
+        ai_paths = set(self._db.cached_filepaths(folder).keys())
+        tp_rows  = self._tp_reader.images_in_folder(folder)
+        extra    = [r for r in tp_rows if r["filepath"] not in ai_paths]
+        if extra:
+            self._grid.append_rows(extra)
 
     def _on_refresh(self):
         self._grid.refresh()

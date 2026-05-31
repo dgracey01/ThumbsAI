@@ -22,6 +22,7 @@ Pragmas:
 from __future__ import annotations
 import hashlib
 import sqlite3
+import threading
 from datetime import datetime
 from pathlib  import Path
 
@@ -45,21 +46,53 @@ def _file_hash(path: str) -> str:
 
 
 class ThumbsDB:
+    """SQLite cache with one connection PER THREAD.
+
+    A single shared connection serialises every read and write through one
+    lock, so a UI-thread folder read would block behind a background scan's
+    write. Giving each thread its own connection lets WAL mode do what it was
+    enabled for: concurrent reads while a background write is in progress.
+    Each method still uses ``self._c``, which now resolves to the calling
+    thread's own connection via the property below.
+    """
+
     def __init__(self):
-        self._c = sqlite3.connect(str(THUMBS_DB), check_same_thread=False,
-                                  timeout=5.0)
-        self._c.row_factory = sqlite3.Row
+        self._local      = threading.local()
+        self._all_conns  = []
+        self._conns_lock = threading.Lock()
+        # First self._c access (inside _init) creates this thread's connection
+        # with pragmas; then we build the schema and run migrations once.
         self._init()
 
-    def _init(self):
-        self._c.execute("PRAGMA journal_mode=WAL")
-        self._c.execute("PRAGMA synchronous=NORMAL")
-        self._c.execute("PRAGMA cache_size=-64000")       # 64 MB page cache
-        self._c.execute("PRAGMA mmap_size=536870912")     # 512 MB memory-map
-        self._c.execute("PRAGMA temp_store=MEMORY")
-        self._c.execute("PRAGMA busy_timeout=5000")       # wait up to 5 s on lock
-        self._c.execute("PRAGMA wal_autocheckpoint=1000") # checkpoint every 1000 pages
+    def _make_conn(self) -> sqlite3.Connection:
+        """Open a new connection and apply per-connection pragmas."""
+        c = sqlite3.connect(str(THUMBS_DB), check_same_thread=False, timeout=5.0)
+        c.row_factory = sqlite3.Row
+        # journal_mode=WAL persists on the DB file; the rest are per-connection
+        # and must be set on every new connection.
+        c.execute("PRAGMA journal_mode=WAL")
+        c.execute("PRAGMA synchronous=NORMAL")
+        c.execute("PRAGMA cache_size=-64000")       # 64 MB page cache
+        c.execute("PRAGMA mmap_size=536870912")     # 512 MB memory-map
+        c.execute("PRAGMA temp_store=MEMORY")
+        c.execute("PRAGMA busy_timeout=5000")       # wait up to 5 s on lock
+        c.execute("PRAGMA wal_autocheckpoint=1000") # checkpoint every 1000 pages
+        return c
 
+    @property
+    def _c(self) -> sqlite3.Connection:
+        """The calling thread's own connection (created lazily on first use)."""
+        c = getattr(self._local, "conn", None)
+        if c is None:
+            c = self._make_conn()
+            self._local.conn = c
+            with self._conns_lock:
+                self._all_conns.append(c)
+        return c
+
+    def _init(self):
+        # Touch self._c to create the main-thread connection (with pragmas),
+        # then create the schema and run migrations once.
         self._c.executescript("""
             -- ── Metadata table (no BLOBs) ────────────────────────────────────
             CREATE TABLE IF NOT EXISTS images (
@@ -395,6 +428,26 @@ class ThumbsDB:
         self._c.execute("DELETE FROM images WHERE filepath=?", (filepath,))
         self._c.commit()
 
+    def delete_paths(self, filepaths: list[str]) -> int:
+        """Delete many rows by filepath in one transaction (thumbnails cascade).
+
+        Returns the number of rows removed. Used by the folder scan to prune
+        entries for files that have been deleted from disk — the caller already
+        knows the paths are gone, so no per-file stat() is done here.
+        """
+        if not filepaths:
+            return 0
+        removed = 0
+        # Chunk to stay under SQLite's default 999 bound-parameter limit.
+        for i in range(0, len(filepaths), 500):
+            chunk = filepaths[i:i + 500]
+            ph = ",".join("?" * len(chunk))
+            cur = self._c.execute(
+                f"DELETE FROM images WHERE filepath IN ({ph})", chunk)
+            removed += cur.rowcount
+        self._c.commit()
+        return removed
+
     def delete_missing(self, folder: str) -> int:
         """Remove DB rows for files that no longer exist on disk."""
         import os
@@ -607,4 +660,12 @@ class ThumbsDB:
             self._c.execute("PRAGMA wal_checkpoint(PASSIVE)")
         except Exception:
             pass
-        self._c.close()
+        # Close every per-thread connection that was opened during the session.
+        with self._conns_lock:
+            conns = list(self._all_conns)
+            self._all_conns.clear()
+        for c in conns:
+            try:
+                c.close()
+            except Exception:
+                pass

@@ -452,7 +452,7 @@ class _ThumbWorker(QThread):
     """
     image_ready = Signal(str, dict)   # filepath, db_row dict
     progress    = Signal(str)         # status message
-    finished    = Signal(int, int)    # added, skipped
+    finished    = Signal(int, int, int)  # added, skipped, removed
 
     def __init__(self, folder: str, thumb_size: int, db: ThumbsDB,
                  enabled_exts: set | None = None):
@@ -487,6 +487,8 @@ class _ThumbWorker(QThread):
         cached  = self._db.cached_filepaths_recursive(folder)
         added   = 0
         skipped = 0
+        removed = 0
+        disk_paths: set[str] = set()   # every real file seen on disk this pass
 
         # ── Single lazy pass: enumerate files + mtime, separate ZIPs, filter ──
         # _iter_folder uses os.scandir DirEntry.stat() — mtime is cached from
@@ -497,6 +499,7 @@ class _ThumbWorker(QThread):
         for fp, mtime in _iter_folder(Path(folder), frozenset(self._enabled_exts)):
             if self.isInterruptionRequested():
                 break
+            disk_paths.add(str(fp))     # record every file that exists on disk
             sfx = fp.suffix.lower()
             if sfx == ".zip":
                 zip_files.append(fp)
@@ -511,6 +514,28 @@ class _ThumbWorker(QThread):
                     continue
             to_process.append((fp, mtime))
 
+        # ── Prune DB rows for files deleted from disk ─────────────────────────
+        # The enumeration above already gave us the folder subtree's true
+        # contents, so stale rows can be dropped with no extra I/O.
+        # Guards:
+        #   • interrupted → disk_paths is incomplete, don't delete what we missed.
+        #   • empty disk_paths → could be a genuinely empty subtree OR a failed
+        #     root scandir (transient network/permission error). We refuse to
+        #     prune in that case so a read glitch can never wipe a folder's whole
+        #     cache; a truly emptied folder is reconciled by manual Remove Orphans.
+        if disk_paths and not self.isInterruptionRequested():
+            orphans = []
+            for db_path in cached:
+                if "::" in db_path:
+                    # ZIP member (zip_path::member) — orphaned only if the
+                    # archive itself is gone; keep it while the .zip exists.
+                    if db_path.split("::", 1)[0] not in disk_paths:
+                        orphans.append(db_path)
+                elif db_path not in disk_paths:
+                    orphans.append(db_path)
+            if orphans:
+                removed = self._db.delete_paths(orphans)
+
         # ── Process ZIPs sequentially ─────────────────────────────────────────
         for fp in zip_files:
             if self.isInterruptionRequested():
@@ -520,12 +545,12 @@ class _ThumbWorker(QThread):
             skipped += s
 
         if self.isInterruptionRequested():
-            self.finished.emit(added, skipped)
+            self.finished.emit(added, skipped, removed)
             return
 
         n_work = len(to_process)
         if n_work == 0:
-            self.finished.emit(added, skipped)
+            self.finished.emit(added, skipped, removed)
             return
 
         self.progress.emit(f"Processing {n_work:,} new/changed files…")
@@ -618,7 +643,7 @@ class _ThumbWorker(QThread):
             self._flush_batch(batch)
             added += len(batch)
 
-        self.finished.emit(added, skipped)
+        self.finished.emit(added, skipped, removed)
 
     def _flush_batch(self, batch: list[dict]) -> None:
         """Write a batch of processed records to the DB and emit image_ready signals."""
@@ -2794,12 +2819,40 @@ class _DbThumbLoader(QRunnable):
             self._signals.done.emit(self._filepath, None)
 
 
+class _FolderLoadSignals(QObject):
+    done = Signal(str, int, object)   # (folder, generation, rows)
+
+
+class _FolderLoader(QRunnable):
+    """Runs images_in_folder() off the UI thread so folder navigation never
+    blocks the event loop. A generation counter lets the grid discard results
+    from a folder it has already navigated away from."""
+    def __init__(self, db, folder: str, gen: int, sort_args: tuple,
+                 signals: "_FolderLoadSignals"):
+        super().__init__()
+        self.setAutoDelete(True)
+        self._db        = db
+        self._folder    = folder
+        self._gen       = gen
+        self._sort_args = sort_args
+        self._signals   = signals
+
+    def run(self):
+        try:
+            rows = self._db.images_in_folder(
+                self._folder, *self._sort_args, with_thumbnails=False)
+        except Exception:
+            rows = []
+        self._signals.done.emit(self._folder, self._gen, rows)
+
+
 # ── Main thumbnail grid ───────────────────────────────────────────────────────
 
 class ThumbGrid(QWidget):
     status_changed    = Signal(str)
     scan_finished     = Signal()
     task_list_changed = Signal(list)
+    folder_loaded     = Signal(str)   # emitted (on UI thread) after a folder's rows are applied
 
     def __init__(self, db: ThumbsDB, settings=None, parent=None):
         super().__init__(parent)
@@ -2841,6 +2894,12 @@ class ThumbGrid(QWidget):
         self._loader_signals.done.connect(self._on_thumb_decoded)
         self._decode_pool = QThreadPool(self)
         self._decode_pool.setMaxThreadCount(max(2, QThread.idealThreadCount() - 1))
+        # ── Background folder loader (runs the DB query off the UI thread) ────
+        self._folder_load_signals = _FolderLoadSignals()
+        self._folder_load_signals.done.connect(self._on_folder_loaded)
+        self._folder_pool = QThreadPool(self)
+        self._folder_pool.setMaxThreadCount(1)
+        self._folder_gen  = 0
         # ── Task queue ────────────────────────────────────────────────────────
         self._task_queue:   deque = deque()
         self._task_running: bool  = False
@@ -2961,21 +3020,32 @@ class ThumbGrid(QWidget):
                 pass
 
     def load_folder(self, folder: str):
-        """Show cached thumbnails for folder instantly. Does NOT start a scan."""
+        """Show cached thumbnails for folder. The DB query runs on a worker
+        thread so navigation never blocks the event loop. Does NOT start a scan."""
         folder = str(Path(folder))
         self._folder = folder
-        self._clear_grid()
+        self._folder_gen += 1
+        self._clear_grid()        # also resets self._rows = [] → grid shows empty
         if not folder or not os.path.isdir(folder):
             return
-        all_rows   = self._db.images_in_folder(
-            folder,
-            self._sort,  self._sort_dir,
-            self._sort2, self._sort2_dir,
-            self._sort3, self._sort3_dir,
-            with_thumbnails=False)
-        self._rows = [r for r in all_rows
+        sort_args = (self._sort,  self._sort_dir,
+                     self._sort2, self._sort2_dir,
+                     self._sort3, self._sort3_dir)
+        # Drop any queued (not-yet-started) stale loads, then dispatch this one.
+        self._folder_pool.clear()
+        self._folder_pool.start(
+            _FolderLoader(self._db, folder, self._folder_gen,
+                          sort_args, self._folder_load_signals))
+
+    def _on_folder_loaded(self, folder: str, gen: int, rows: object):
+        """Apply rows from a background folder load (UI thread, queued signal).
+        Discards results from a folder we've since navigated away from."""
+        if gen != self._folder_gen or folder != self._folder:
+            return
+        self._rows = [r for r in rows
                       if Path(r["filepath"]).suffix.lower() in self._enabled_exts]
         self._rebuild_pool()
+        self.folder_loaded.emit(folder)
 
     def append_rows(self, rows: list[dict]):
         """Append extra image rows (e.g. from ThumbsPlus Read Only) to the current grid."""
@@ -3387,7 +3457,7 @@ class ThumbGrid(QWidget):
         self._disk_worker.finished.connect(self._on_disk_folder_done)
         self._disk_worker.start()
 
-    def _on_disk_folder_done(self, added: int, _skipped: int):
+    def _on_disk_folder_done(self, added: int, _skipped: int, _removed: int = 0):
         self._disk_totals[0] += added
         self._next_disk_scan()
 
@@ -3642,24 +3712,31 @@ class ThumbGrid(QWidget):
                 card._img.setPixmap(px)
                 break
 
-    def _on_worker_finished(self, added: int, skipped: int):
+    def _on_worker_finished(self, added: int, skipped: int, removed: int = 0):
         self._prog.setVisible(False)
         scanned = self._worker_folder
         if self._folder and scanned == self._folder:
+            # Metadata-only (no BLOBs) — visible cards pull their thumbnails
+            # on demand via _DbThumbLoader, same as load_folder.
             all_rows   = self._db.images_in_folder(
                 self._folder,
                 self._sort,  self._sort_dir,
                 self._sort2, self._sort2_dir,
-                self._sort3, self._sort3_dir)
+                self._sort3, self._sort3_dir,
+                with_thumbnails=False)
             self._rows = [r for r in all_rows
                           if Path(r["filepath"]).suffix.lower() in self._enabled_exts]
-            if added > 0:
+            # Rebuild when rows were added OR pruned (deletions shrink the grid,
+            # so the container height must be recomputed — _assign_pool can't).
+            if added > 0 or removed > 0:
                 self._selected_fps.clear()
                 self._anchor_fp = None
                 self._px_cache.clear()
                 self._cache_lru.clear()
                 self._pending_decodes.clear()
-                self._scroll.verticalScrollBar().setValue(0)
+                if added > 0:
+                    # Only jump to top for new images; keep position on delete-only.
+                    self._scroll.verticalScrollBar().setValue(0)
                 self._rebuild_pool()
             else:
                 self._px_cache.clear()
@@ -3668,7 +3745,8 @@ class ThumbGrid(QWidget):
                 self._assign_pool()
         total = len(self._rows)
         msg   = (f"{total} image{'s' if total != 1 else ''}"
-                 + (f"  ·  {added} new" if added else ""))
+                 + (f"  ·  {added} new" if added else "")
+                 + (f"  ·  {removed} removed" if removed else ""))
         if self._folder:
             msg += f"  ·  {Path(self._folder).name}"
         self.status_changed.emit(msg)
