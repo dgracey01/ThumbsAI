@@ -2968,9 +2968,21 @@ class ThumbGrid(QWidget):
         from io import BytesIO as _BytesIO
         try:
             from PIL import Image as _PIL
-            from plugin_host import run_plugin_filter
-            img    = _PIL.open(filepath)
-            result = run_plugin_filter(plugin_info, img, int(self.winId()))
+            img  = _PIL.open(filepath)
+            hwnd = int(self.winId())
+            # Prefer the mature pspiHost.dll engine (it correctly drives the filter's
+            # settings dialog); fall back to the built-in ctypes host if the DLL isn't
+            # present. Both expose run_plugin_filter(plugin, image, hwnd).
+            try:
+                import pspi_host
+                _use_pspi = pspi_host.available()
+            except Exception:
+                _use_pspi = False
+            if _use_pspi:
+                result = pspi_host.run_plugin_filter(plugin_info, img, hwnd)
+            else:
+                from plugin_host import run_plugin_filter
+                result = run_plugin_filter(plugin_info, img, hwnd)
         except (RuntimeError, Exception) as exc:
             _mb = QMessageBox(self)
             _mb.setWindowTitle("Plugin Error")

@@ -658,7 +658,7 @@ Steps: 30, Sampler: Euler a, CFG scale: 7, Seed: 1234567890, Model: v1-5-pruned<
   <!-- ─── PLUGINS ─── -->
   <div class="section" id="plugins">
     <h2>Photoshop .8bf Plugins</h2>
-    <p>ThumbsAI can apply Photoshop-compatible <code>.8bf</code> filter plugins directly to images. These are the same plugins that run in Photoshop, Affinity Photo, and similar hosts — no Photoshop installation required.</p>
+    <p>ThumbsAI can apply Photoshop-compatible <code>.8bf</code> filter plugins directly to images, <strong>including each plugin's own settings dialog</strong>. These are the same plugins that run in Photoshop, Affinity Photo, and similar hosts — no Photoshop installation required. Both 32-bit and 64-bit filters are supported.</p>
 
     <h3>Setup</h3>
     <ol>
@@ -670,6 +670,9 @@ Steps: 30, Sampler: Euler a, CFG scale: 7, Seed: 1234567890, Model: v1-5-pruned<
 
     <h3>Included Redfield Plugins</h3>
     <p>Fractalius, Fractalius 2, FaceControl, FineTouch, Perfectum 2, Sharpinion, SharpinionHD, SketchMaster, iEmboss, UMATRIX, and Atx.</p>
+
+    <h3>Plugin Engine &amp; Credits</h3>
+    <p>Filter hosting is powered by <strong>pspiHost</strong> (<a href="https://github.com/spetric/Photoshop-Plugin-Host">spetric/Photoshop-Plugin-Host</a>, <code>pspiHost.dll</code>, MIT License) — a mature, embeddable Photoshop-filter host that correctly drives each filter's interactive dialog. If <code>pspiHost.dll</code> is not present, ThumbsAI falls back to a built-in host. The included filters are the <a href="http://www.redfieldplugins.com/">Redfield</a> plugin collection.</p>
   </div>
 
   <!-- ─── LAUNCH APPS ─── -->

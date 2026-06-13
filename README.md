@@ -17,7 +17,7 @@ and lets you browse, search, sort, and organize thousands of images without any 
 - **Favorites** — pin frequently used folders to a fast flat list that bypasses filesystem tree scanning
 - **Folder color indicators** — see at a glance which folders have been scanned, which have thumbnails, and which are watched or favorited
 - **Similarity sort** — visually reorder the grid by perceptual similarity to a selected image
-- **Photoshop `.8bf` plugin support** — apply Photoshop-compatible filters without Photoshop (Redfield plugin collection included)
+- **Photoshop `.8bf` plugin support** — apply Photoshop-compatible filters **with their own settings dialogs**, without Photoshop, via the embedded **pspiHost** engine (32- and 64-bit filters; Redfield collection included)
 - **Image operations** — rotate, flip, resize, blur, sharpen, color balance, HSLC, denoise, and more
 - **Batch processing** — batch pipeline and batch save-as across multiple selected images
 - **Video thumbnail support** — extracts keyframes from MP4, MKV, AVI, MOV (requires FFmpeg)
@@ -140,7 +140,9 @@ ThumbsAI/
 ├── database.py          — SQLite thumbnail cache
 ├── ai_metadata.py       — AI metadata parser and writer
 ├── image_ops.py         — Image processing operations
-├── plugin_host.py       — Photoshop .8bf plugin loader
+├── pspi_host.py         — Bridge to the pspiHost.dll .8bf engine (primary plugin path)
+├── pspiHost.dll         — Embedded 8bf host engine (spetric/Photoshop-Plugin-Host, x64)
+├── plugin_host.py       — Built-in ctypes .8bf host (fallback if pspiHost.dll is absent)
 ├── settings.py          — JSON settings persistence
 ├── theme.py             — Qt stylesheet and color constants
 ├── assets/              — Toolbar icons
@@ -152,6 +154,17 @@ ThumbsAI/
 ├── RESTORE_DATA.bat     — User data restore tool
 └── ThumbsAI_Help.html   — Full user documentation
 ```
+
+---
+
+## Credits & Acknowledgements
+
+- **Photoshop `.8bf` plugin host:** [**pspiHost** — spetric/Photoshop-Plugin-Host](https://github.com/spetric/Photoshop-Plugin-Host)
+  (`pspiHost.dll`, MIT License). ThumbsAI embeds this engine to load and run Photoshop-compatible
+  filters — including their interactive settings dialogs — and drives it through
+  [`pspi_host.py`](pspi_host.py). A built-in ctypes host (`plugin_host.py`) is retained as a fallback.
+- **Included filters:** the [Redfield](http://www.redfieldplugins.com/) `.8bf` plugin collection
+  (Fractalius, Perfectum 2, Sketch Master, and others), redistributed with ThumbsAI.
 
 ---
 

@@ -234,213 +234,242 @@ class AboutRecord(Structure):
 
 class FilterRecord(Structure):
     """
-    Photoshop CS5/CS6 FilterRecord — 64-bit Windows, #pragma pack(2).
-    Matches PIFilter.h from the CS5 SDK (kCurrentFilterProcsVersion = 4).
+    Photoshop FilterRecord — 64-bit Windows, **Pack = 4**, classic 16-bit Point/Rect.
+    Rebuilt 2026-06-12 to match PSFilterPdn (github 0xC0000054/PSFilterPdn,
+    src/PSApi/FilterRecord.cs), the reference open-source 8bf host.
 
-    CRITICAL field-order notes vs. the old wrong layout:
-      • offset 20 is 'parameters' (Handle, 8 bytes) — NOT 'imageMode' (2 bytes)
-      • 'imageMode' is at offset 190, after hostSig/hostProc
-      • 'bufferSpace' exists between maxSpace and inRect
-      • 'platformData' (→ PlatformData / HWND) is before bufferProcs
-      • 'handleProcs' is between displayPixels and colorServices
-      • 'sSPBasic' is at offset 426 (inputRate+maskRate occupy 418–426)
+    The previous layout was wrong in four ways, which made every commercial filter
+    silently no-op (the read-tracer proved it via the plugin's own SEL_START writes):
+      • _pack_ was 2, not 4 (so int/ptr fields aligned wrong — maxSpace, inRect…)
+      • imageSize/filterRect/in/out/maskRect used 32-bit VPoint/VRect, not 16-bit
+        Point/Rect — this alone skewed everything after 'planes' by +12 bytes
+      • 'monitor' was modelled as {Ptr,Fixed}; it is 10×Fixed16 (PlugInMonitor, 40 B),
+        and a spurious 'version' field was invented
+      • the tile / abs-plane / depth / ICC sections were missing
+    Net effect: sSPBasic sat at 426 instead of 464 and the proc tables were ~38 bytes
+    too high, so the plugin read its callbacks/suite pointer from garbage and gave up.
 
-    Offset annotations are for x64 with _pack_=2 (pointer alignment = 2).
+    Validated against the live plugin's SEL_START field writes:
+      imageSize@28 planes@32 inRect@64 outRect@76 maskRect@116 haveMask@113
+      platformData@216 bufferProcs@224 handleProcs@256 colorServices@320
+      descriptorParameters@432 sSPBasic@464 depth@480   (sizeof = 556)
+
+    Sub-type widths: Point16=2×int16(4) · Rect16=4×int16(8) · RGBColor=3×uint16(6) ·
+    Fixed16=int32(4) · PlugInMonitor=10×Fixed16(40) · Boolean=1 · FilterCase=int16.
     """
-    _pack_ = 2
+    _pack_ = 4
     _fields_ = [
-        # ── Core ─────────────────────────────────────────── offsets 0–28 ─────
+        # ── Core ──────────────────────────────────────────────── 0–28 ──────
         ("serialNumber",    c_int32),    # 0
         ("abortProc",       c_void_p),   # 4
         ("progressProc",    c_void_p),   # 12
         ("parameters",      c_void_p),   # 20  Handle — plugin's parameter block
 
-        # ── Image geometry ────────────────────────────────── 28–38 ──────────
-        ("imageSize_v",     c_int32),    # 28  VPoint: v = rows (height)
-        ("imageSize_h",     c_int32),    # 32         h = cols (width)
-        ("planes",          c_int16),    # 36
+        # ── Image geometry (Point16 = 2×int16, Rect16 = 4×int16) ── 28–54 ────
+        ("imageSize_v",     c_int16),    # 28
+        ("imageSize_h",     c_int16),    # 30
+        ("planes",          c_int16),    # 32
+        ("filterRect_top",   c_int16),   # 34
+        ("filterRect_left",  c_int16),   # 36
+        ("filterRect_bottom",c_int16),   # 38
+        ("filterRect_right", c_int16),   # 40
+        ("background_r",    c_uint16),   # 42  RGBColor
+        ("background_g",    c_uint16),   # 44
+        ("background_b",    c_uint16),   # 46
+        ("foreground_r",    c_uint16),   # 48
+        ("foreground_g",    c_uint16),   # 50
+        ("foreground_b",    c_uint16),   # 52
+        ("maxSpace",        c_int32),    # 56  (pack4 pads 54→56)
+        ("bufferSpace",     c_int32),    # 60
 
-        # ── Filter rect ───────────────────────────────────── 38–54 ──────────
-        ("filterRect_top",   c_int32),   # 38  VRect
-        ("filterRect_left",  c_int32),   # 42
-        ("filterRect_bottom",c_int32),   # 46
-        ("filterRect_right", c_int32),   # 50
+        # ── Input rect + planes ───────────────────────────────── 64–76 ─────
+        ("inRect_top",      c_int16),    # 64
+        ("inRect_left",     c_int16),    # 66
+        ("inRect_bottom",   c_int16),    # 68
+        ("inRect_right",    c_int16),    # 70
+        ("inLoPlane",       c_int16),    # 72
+        ("inHiPlane",       c_int16),    # 74
 
-        # ── Display-space colors (RGBColor = 3×uint16 = 6 bytes each) ────────
-        ("background_r",    c_uint16),   # 54
-        ("background_g",    c_uint16),   # 56
-        ("background_b",    c_uint16),   # 58
-        ("foreground_r",    c_uint16),   # 60
-        ("foreground_g",    c_uint16),   # 62
-        ("foreground_b",    c_uint16),   # 64
+        # ── Output rect + planes ──────────────────────────────── 76–88 ─────
+        ("outRect_top",     c_int16),    # 76
+        ("outRect_left",    c_int16),    # 78
+        ("outRect_bottom",  c_int16),    # 80
+        ("outRect_right",   c_int16),    # 82
+        ("outLoPlane",      c_int16),    # 84
+        ("outHiPlane",      c_int16),    # 86
 
-        # ── Memory limits ─────────────────────────────────── 66–74 ──────────
-        ("maxSpace",        c_int32),    # 66
-        ("bufferSpace",     c_int32),    # 70  plugin sets during Prepare
+        # ── Pixel buffers ─────────────────────────────────────── 88–112 ────
+        ("inData",          c_void_p),   # 88
+        ("inRowBytes",      c_int32),    # 96
+        ("outData",         c_void_p),   # 100
+        ("outRowBytes",     c_int32),    # 108
 
-        # ── Input rect + planes ───────────────────────────── 74–94 ──────────
-        ("inRect_top",      c_int32),    # 74
-        ("inRect_left",     c_int32),    # 78
-        ("inRect_bottom",   c_int32),    # 82
-        ("inRect_right",    c_int32),    # 86
-        ("inLoPlane",       c_int16),    # 90
-        ("inHiPlane",       c_int16),    # 92
+        # ── Mask flags + rect ─────────────────────────────────── 112–124 ───
+        ("isFloating",      c_uint8),    # 112
+        ("haveMask",        c_uint8),    # 113
+        ("autoMask",        c_uint8),    # 114
+        ("maskRect_top",    c_int16),    # 116  (pack4 pads 115→116)
+        ("maskRect_left",   c_int16),    # 118
+        ("maskRect_bottom", c_int16),    # 120
+        ("maskRect_right",  c_int16),    # 122
+        ("maskData",        c_void_p),   # 124
+        ("maskRowBytes",    c_int32),    # 132
 
-        # ── Output rect + planes ──────────────────────────── 94–114 ─────────
-        ("outRect_top",     c_int32),    # 94
-        ("outRect_left",    c_int32),    # 98
-        ("outRect_bottom",  c_int32),    # 102
-        ("outRect_right",   c_int32),    # 106
-        ("outLoPlane",      c_int16),    # 110
-        ("outHiPlane",      c_int16),    # 112
+        # ── Device-space colors (FilterColor = uint8[4]) ──────── 136–144 ───
+        ("backColor",       c_uint8 * 4),# 136
+        ("foreColor",       c_uint8 * 4),# 140
 
-        # ── Mask rect ─────────────────────────────────────── 114–130 ────────
-        ("maskRect_top",    c_int32),    # 114
-        ("maskRect_left",   c_int32),    # 118
-        ("maskRect_bottom", c_int32),    # 122
-        ("maskRect_right",  c_int32),    # 126
+        # ── Host identification ───────────────────────────────── 144–156 ───
+        ("hostSig",         c_uint32),   # 144  four-char OSType
+        ("hostProc",        c_void_p),   # 148  hostProcs (NULL is fine)
 
-        # ── Pixel buffers ─────────────────────────────────── 130–154 ────────
-        ("inData",          c_void_p),   # 130
-        ("inRowBytes",      c_int32),    # 138
-        ("outData",         c_void_p),   # 142
-        ("outRowBytes",     c_int32),    # 150
+        # ── Image properties (Fixed16 = int32 16.16) ──────────── 156–176 ───
+        ("imageMode",       c_int16),    # 156
+        ("imageHRes",       c_int32),    # 160  (pack4 pads 158→160)
+        ("imageVRes",       c_int32),    # 164
+        ("floatCoord_v",    c_int16),    # 168
+        ("floatCoord_h",    c_int16),    # 170
+        ("wholeSize_v",     c_int16),    # 172
+        ("wholeSize_h",     c_int16),    # 174
 
-        # ── Mask flags ────────────────────────────────────── 154–158 ────────
-        ("isFloating",      c_uint8),    # 154
-        ("haveMask",        c_uint8),    # 155
-        ("autoMask",        c_uint8),    # 156
-        ("_pad_bool",       c_uint8),    # 157  → align maskData ptr to 158
+        # ── PlugInMonitor (10 × Fixed16 = 40 bytes) ───────────── 176–216 ───
+        ("monitor_gamma",   c_int32),    # 176
+        ("monitor_redX",    c_int32),    # 180
+        ("monitor_redY",    c_int32),    # 184
+        ("monitor_greenX",  c_int32),    # 188
+        ("monitor_greenY",  c_int32),    # 192
+        ("monitor_blueX",   c_int32),    # 196
+        ("monitor_blueY",   c_int32),    # 200
+        ("monitor_whiteX",  c_int32),    # 204
+        ("monitor_whiteY",  c_int32),    # 208
+        ("monitor_ambient", c_int32),    # 212
 
-        # ── Mask data ─────────────────────────────────────── 158–170 ────────
-        ("maskData",        c_void_p),   # 158
-        ("maskRowBytes",    c_int32),    # 166
+        # ── Platform + proc tables ────────────────────────────── 216–264 ───
+        ("platformData",    c_void_p),   # 216  → PlatformData {HWND, …}
+        ("bufferProcs",     c_void_p),   # 224
+        ("resourceProcs",   c_void_p),   # 232
+        ("processEvent",    c_void_p),   # 240
+        ("displayPixels",   c_void_p),   # 248
+        ("handleProcs",     c_void_p),   # 256
 
-        # ── Device-space colors (FilterColor = uint8[4]) ──── 170–178 ────────
-        ("backColor",       c_uint8 * 4), # 170
-        ("foreColor",       c_uint8 * 4), # 174
+        # ── Layout flags + filter case ────────────────────────── 264–272 ───
+        ("supportsDummyChannels",    c_uint8),  # 264
+        ("supportsAlternateLayouts", c_uint8),  # 265
+        ("wantLayout",               c_int16),  # 266
+        ("filterCase",               c_int16),  # 268  (FilterCase : short)
+        ("dummyPlaneValue",          c_int16),  # 270
+        ("premiereHook",    c_void_p),   # 272
 
-        # ── Host identification ───────────────────────────── 178–190 ────────
-        ("hostSig",         c_uint32),   # 178  four-char OSType
-        ("hostProc",        c_void_p),   # 182  host callback (NULL is fine)
+        # ── advanceState + absolute/property ──────────────────── 280–300 ───
+        ("advanceState",        c_void_p), # 280
+        ("supportsAbsolute",    c_uint8),  # 288
+        ("wantsAbsolute",       c_uint8),  # 289
+        ("getPropertyObsolete", c_void_p), # 292  (pack4 pads 290→292)
+        ("cannotUndo",          c_uint8),  # 300
+        ("supportsPadding",     c_uint8),  # 301
 
-        # ── Image properties ──────────────────────────────── 190–216 ────────
-        ("imageMode",       c_int16),    # 190
-        ("imageHRes",       c_int32),    # 192  Fixed 16.16 (72<<16 = 72 DPI)
-        ("imageVRes",       c_int32),    # 196
-        ("floatCoord_v",    c_int32),    # 200  floating selection origin
-        ("floatCoord_h",    c_int32),    # 204
-        ("wholeSize_v",     c_int32),    # 208  whole image size
-        ("wholeSize_h",     c_int32),    # 212
+        # ── Padding + sampling + rates ────────────────────────── 302–320 ───
+        ("inputPadding",    c_int16),    # 302
+        ("outputPadding",   c_int16),    # 304
+        ("maskPadding",     c_int16),    # 306
+        ("samplingSupport", c_uint8),    # 308
+        ("reservedByte",    c_uint8),    # 309
+        ("inputRate",       c_int32),    # 312  Fixed16 (pack4 pads 310→312)
+        ("maskRate",        c_int32),    # 316
+        ("colorServices",   c_void_p),   # 320
 
-        # ── Monitor (PlugInMonitor = {Ptr, Fixed}) ────────── 216–228 ────────
-        ("monitor_gammaTable", c_void_p),# 216
-        ("monitor_gamma",   c_int32),    # 224
+        # ── Layer-plane counts (in/out/abs) ───────────────────── 328–358 ───
+        ("inLayerPlanes",          c_int16), # 328
+        ("inTransparencyMask",     c_int16), # 330
+        ("inLayerMasks",           c_int16), # 332
+        ("inInvertedLayerMasks",   c_int16), # 334
+        ("inNonLayerPlanes",       c_int16), # 336  ← 3 for flat RGB
+        ("outLayerPlanes",         c_int16), # 338
+        ("outTransparencyMask",    c_int16), # 340
+        ("outLayerMasks",          c_int16), # 342
+        ("outInvertedLayerMasks",  c_int16), # 344
+        ("outNonLayerPlanes",      c_int16), # 346
+        ("absLayerPlanes",         c_int16), # 348
+        ("absTransparencyMask",    c_int16), # 350
+        ("absLayerMasks",          c_int16), # 352
+        ("absInvertedLayerMasks",  c_int16), # 354
+        ("absNonLayerPlanes",      c_int16), # 356
 
-        # ── Platform + proc tables ────────────────────────── 228–300 ────────
-        ("platformData",    c_void_p),   # 228  → PlatformData {HWND, filterCase, …}
-        ("bufferProcs",     c_void_p),   # 236
-        ("resourceProcs",   c_void_p),   # 244
-        ("processEvent",    c_void_p),   # 252
-        ("displayPixels",   c_void_p),   # 260
-        ("handleProcs",     c_void_p),   # 268
-        ("colorServices",   c_void_p),   # 276
-        ("advanceState",    c_void_p),   # 284
-        ("propertyProcs",   c_void_p),   # 292
+        # ── Dummy-plane counts ────────────────────────────────── 358–366 ───
+        ("inPreDummyPlanes",  c_int16),  # 358
+        ("inPostDummyPlanes", c_int16),  # 360
+        ("outPreDummyPlanes", c_int16),  # 362
+        ("outPostDummyPlanes",c_int16),  # 364
 
-        # ── Version + extended procs ──────────────────────── 300–342 ────────
-        ("version",                   c_int16),  # 300
-        ("imageServicesProcs",        c_void_p), # 302
-        ("descriptorParameters",      c_void_p), # 310
-        ("errorString",               c_void_p), # 318
-        ("channelPortProcs",          c_void_p), # 326
-        ("documentInfo",              c_void_p), # 334
+        # ── Byte strides ──────────────────────────────────────── 368–384 ───
+        ("inColumnBytes",   c_int32),    # 368  (pack4 pads 366→368)  ← 3 flat RGB
+        ("inPlaneBytes",    c_int32),    # 372  ← 1 for flat RGB
+        ("outColumnBytes",  c_int32),    # 376
+        ("outPlaneBytes",   c_int32),    # 380
 
-        # ── Layout flags ──────────────────────────────────── 342–350 ────────
-        ("supportsDummyChannels",     c_int16),  # 342
-        ("supportsAlternateLayouts",  c_int16),  # 344
-        ("wantLayout",                c_int16),  # 346
-        ("filterCaseInfoCount",       c_int16),  # 348
+        # ── Image-services + property suites ──────────────────── 384–400 ───
+        ("imageServicesProcs", c_void_p), # 384
+        ("propertyProcs",      c_void_p), # 392
 
-        # ── Filter case + Premiere ────────────────────────── 350–370 ────────
-        ("filterCaseInfo",  c_void_p),   # 350
-        ("dummyPlaneValue", c_int32),    # 358
-        ("premiereHook",    c_void_p),   # 362
+        # ── Tile sizes/origins (in/abs/out/mask) ──────────────── 400–432 ───
+        ("inTileHeight",   c_int16),     # 400
+        ("inTileWidth",    c_int16),     # 402
+        ("inTileOrigin_v", c_int16),     # 404
+        ("inTileOrigin_h", c_int16),     # 406
+        ("absTileHeight",  c_int16),     # 408
+        ("absTileWidth",   c_int16),     # 410
+        ("absTileOrigin_v",c_int16),     # 412
+        ("absTileOrigin_h",c_int16),     # 414
+        ("outTileHeight",  c_int16),     # 416
+        ("outTileWidth",   c_int16),     # 418
+        ("outTileOrigin_v",c_int16),     # 420
+        ("outTileOrigin_h",c_int16),     # 422
+        ("maskTileHeight", c_int16),     # 424
+        ("maskTileWidth",  c_int16),     # 426
+        ("maskTileOrigin_v",c_int16),    # 428
+        ("maskTileOrigin_h",c_int16),    # 430
 
-        # ── More callbacks ────────────────────────────────── 370–390 ────────
-        ("advanceState2",       c_void_p), # 370
-        ("supportsAbsolute",    c_int16),  # 378
-        ("wantsAbsolute",       c_int16),  # 380
-        ("getPropertyObsolete", c_void_p), # 382
-
-        # ── Behaviour flags ───────────────────────────────── 390–394 ────────
-        ("cannotUndo",        c_uint8),  # 390
-        ("noAbort",           c_uint8),  # 391
-        ("wantsMaskAsBitmap", c_uint8),  # 392
-        ("_pad_flags",        c_uint8),  # 393
-
-        # ── Dummy-plane counts ────────────────────────────── 394–402 ────────
-        ("inPreDummyPlanes",  c_int16),  # 394
-        ("inPostDummyPlanes", c_int16),  # 396
-        ("outPreDummyPlanes", c_int16),  # 398
-        ("outPostDummyPlanes",c_int16),  # 400
-
-        # ── Edge-extension padding (Fixed 16.16) ──────────── 402–414 ────────
-        ("inputPadding",    c_int32),    # 402
-        ("outputPadding",   c_int32),    # 406
-        ("maskPadding",     c_int32),    # 410
-
-        # ── Alternate layout ──────────────────────────────── 414–418 ────────
-        ("padBytes",          c_int16),  # 414
-        ("isFirstAlternate",  c_int16),  # 416
-        ("inputRate",         c_int32),  # 418  Fixed 16.16 input sampling rate
-        ("maskRate",          c_int32),  # 422  Fixed 16.16 mask sampling rate
-
-        # ── PICA suite pointers ───────────────────────────── 426– ───────────
-        ("sSPBasic",        c_void_p),   # 426
-        ("plugInRef",       c_void_p),   # 434
-
-        # ── ICC + transparency ────────────────────────────── 442– ───────────
-        ("transparentIndex",    c_int32), # 442
-        ("flattenedImageData",  c_void_p),# 446
-        ("iCCprofileSize",      c_int32), # 454
-        ("iCCprofileData",      c_void_p),# 458
-        ("canUseICCProfiles",   c_int32), # 466
-        ("inDataHandling",      c_int32), # 470
-        ("outDataHandling",     c_int32), # 474
-        ("maskDataHandling",    c_int32), # 478
-
-        # ── Layer-plane counts and byte strides (PSFilterPdn / CS5 SDK) ─────
-        ("inLayerPlanes",          c_int16), # 482
-        ("inTransparencyMask",     c_int16), # 484
-        ("inLayerMasks",           c_int16), # 486
-        ("inInvertedLayerMasks",   c_int16), # 488
-        ("inNonLayerPlanes",       c_int16), # 490  ← 3 for flat RGB
-        ("outLayerPlanes",         c_int16), # 492
-        ("outTransparencyMask",    c_int16), # 494
-        ("outLayerMasks",          c_int16), # 496
-        ("outInvertedLayerMasks",  c_int16), # 498
-        ("outNonLayerPlanes",      c_int16), # 500
-        ("inColumnBytes",          c_int32), # 502  ← 3 for flat RGB
-        ("inPlaneBytes",           c_int32), # 506  ← 1 for flat RGB
-        ("outColumnBytes",         c_int32), # 510
-        ("outPlaneBytes",          c_int32), # 514
-        ("_reserved_tail",  c_uint8 * 220), # 518
+        # ── Extended procs + PICA + depth + ICC ───────────────── 432– ──────
+        ("descriptorParameters", c_void_p), # 432
+        ("errorString",          c_void_p), # 440
+        ("channelPortProcs",     c_void_p), # 448
+        ("documentInfo",         c_void_p), # 456
+        ("sSPBasic",             c_void_p), # 464  ← PICA basic suite
+        ("plugInRef",            c_void_p), # 472
+        ("depth",                c_int32),  # 480  ← 8 (bits/channel)
+        ("iCCprofileData",       c_void_p), # 484  Handle
+        ("iCCprofileSize",       c_int32),  # 492
+        ("canUseICCProfiles",    c_int32),  # 496
+        ("_reserved_tail",  c_uint8 * 54),  # 500  (sizeof = 556)
     ]
 
 
 # ── FilterRecord layout verification (runs at import time) ───────────────────
 def _verify_fr_layout():
-    checks = {"parameters": 20, "imageMode": 190, "handleProcs": 268, "sSPBasic": 426}
+    # Expected offsets: empirical anchors (proven by the live plugin's SEL_START writes)
+    # plus the PSFilterPdn-derived pointer offsets. Any drift here means the ABI is broken.
+    checks = {
+        # empirically validated against the plugin itself:
+        "imageSize_v": 28, "planes": 32, "inRect_top": 64, "inLoPlane": 72,
+        "inHiPlane": 74, "outRect_top": 76, "outLoPlane": 84, "outHiPlane": 86,
+        "haveMask": 113, "maskRect_top": 116,
+        # PSFilterPdn reference offsets:
+        "platformData": 216, "bufferProcs": 224, "handleProcs": 256, "colorServices": 320,
+        "imageServicesProcs": 384, "propertyProcs": 392, "descriptorParameters": 432,
+        "sSPBasic": 464, "depth": 480,
+    }
     ok = True
     for fname, expected in checks.items():
         actual = getattr(FilterRecord, fname).offset
         if actual != expected:
             _eprint(f"[8bf] LAYOUT MISMATCH: FilterRecord.{fname} @ {actual}, expected {expected}")
             ok = False
+    if ctypes.sizeof(FilterRecord) != 556:
+        _eprint(f"[8bf] LAYOUT MISMATCH: sizeof={ctypes.sizeof(FilterRecord)}, expected 556")
+        ok = False
     status = "OK" if ok else "BAD"
     _eprint(f"[8bf] FilterRecord layout {status} (size={ctypes.sizeof(FilterRecord)}, "
-            f"sSPBasic@{FilterRecord.sSPBasic.offset})")
+            f"sSPBasic@{FilterRecord.sSPBasic.offset}, pack=4)")
 _verify_fr_layout()
 
 # ── Plugin metadata ───────────────────────────────────────────────────────────
@@ -1158,11 +1187,38 @@ def _patch_iat_diagnostics(dll, log_fn) -> dict:
     # ── Dialog / window creation ──────────────────────────────────────────────
     def _make_dlgbox(real_fn, fname):
         hits[fname] = 0
+        # CRITICAL: without explicit argtypes, ctypes coerces each arg to 32-bit c_int,
+        # so a 64-bit HINSTANCE/HWND/template pointer overflows ("int too long to convert")
+        # and the real DialogBoxParam is never called. Declare all params pointer-wide.
+        try:
+            real_fn.argtypes = [c_void_p, c_void_p, c_void_p, c_void_p, c_void_p]
+            real_fn.restype  = ctypes.c_ssize_t   # INT_PTR
+        except Exception:
+            pass
         @WINFUNCTYPE(c_int32, c_void_p, c_void_p, c_void_p, c_void_p, c_void_p)
         def _stub(hInst, tmpl, hParent, dlgProc, initParam):
             hits[fname] += 1
-            log_fn(f"[8bf] IAT {fname}(hParent=0x{hParent or 0:x})")
-            return real_fn(hInst, tmpl, hParent, dlgProc, initParam)
+            # hInst = module holding the dialog template; tmpl = template id/ptr;
+            # hParent = owner window. ret=-1 + a resource error = template not loadable;
+            # 1400 = ERROR_INVALID_WINDOW_HANDLE (bad/cross-thread hParent).
+            _k32 = ctypes.windll.kernel32
+            try:
+                log_fn(f"[8bf] IAT {fname}(hInst=0x{hInst or 0:x} tmpl=0x{tmpl or 0:x} "
+                       f"hParent=0x{hParent or 0:x} dlgProc=0x{dlgProc or 0:x})")
+            except Exception:
+                pass
+            ret = None
+            try:
+                _k32.SetLastError(0)
+                ret = real_fn(hInst, tmpl, hParent, dlgProc, initParam)
+                err = _k32.GetLastError()
+                log_fn(f"[8bf] IAT {fname} -> ret={ret} GetLastError={err}")
+            except Exception as _de:
+                try:
+                    log_fn(f"[8bf] IAT {fname} EXCEPTION in real call/log: {_de!r}")
+                except Exception:
+                    pass
+            return ret if ret is not None else 0
         _iat_live.append(_stub)
         return cast(_stub, c_void_p).value
 
@@ -1689,6 +1745,152 @@ def run_plugin_about(plugin_info: PluginInfo, parent_hwnd: int = 0):
     pm(SEL_ABOUT, addressof(ar), byref(data_val), byref(result))
 
 
+# ── FilterRecord read-tracer (diagnostic) ────────────────────────────────────
+# When _TRACE_FR_READS is on, the FilterRecord is placed on its own VirtualAlloc'd
+# page and a PAGE_GUARD + vectored-exception-handler logs every field the plugin
+# READS during SEL_PARAMETERS, in order.  This shows exactly which field the plugin
+# inspects right before it gives up (no dialog, no AcquireSuite, no pixel change).
+# Fully self-disabling: any failure falls back to a normal untraced call, and
+# setting the flag False makes run_plugin_filter byte-identical to before.
+_TRACE_FR_READS = False
+
+_TR_PAGE_RW      = 0x04
+_TR_PAGE_GUARD   = 0x100
+_TR_MEM_COMMIT   = 0x1000
+_TR_MEM_RESERVE  = 0x2000
+_TR_MEM_RELEASE  = 0x8000
+_TR_GUARD_PAGE   = 0x80000001   # STATUS_GUARD_PAGE_VIOLATION
+_TR_SINGLE_STEP  = 0x80000004   # STATUS_SINGLE_STEP
+_TR_CONT_EXEC    = -1           # EXCEPTION_CONTINUE_EXECUTION (0xFFFFFFFF as LONG)
+_TR_CONT_SEARCH  = 0            # EXCEPTION_CONTINUE_SEARCH
+_TR_TRAP_FLAG    = 0x100
+_TR_CTX_EFLAGS   = 0x44         # x64 CONTEXT.EFlags offset
+# EXCEPTION_RECORD (x64): ExceptionInformation[0] @ +32, [1] @ +40
+_TR_EXCINFO0     = 32
+_TR_EXCINFO1     = 40
+
+_PVEH_T = WINFUNCTYPE(ctypes.c_long, c_void_p)
+
+
+class _TR_EXC_POINTERS(Structure):
+    _fields_ = [("ExceptionRecord", c_void_p), ("ContextRecord", c_void_p)]
+
+
+def _tr_field_map():
+    """[(offset, size, name)] for every FilterRecord field — for offset→name lookup."""
+    out = []
+    for _f in FilterRecord._fields_:
+        name = _f[0]
+        try:
+            fld = getattr(FilterRecord, name)
+            out.append((fld.offset, fld.size, name))
+        except Exception:
+            pass
+    return sorted(out)
+
+
+def _tr_name_at(field_map, off):
+    for o, sz, nm in field_map:
+        if o <= off < o + sz:
+            return nm
+    return f"<+{off}>"
+
+
+def _tr_alloc_fr_page():
+    """VirtualAlloc a zeroed page-aligned region for the FilterRecord.
+    Returns (base:int, size:int, FilterRecord view)."""
+    k32 = ctypes.windll.kernel32
+    k32.VirtualAlloc.restype  = c_void_p
+    k32.VirtualAlloc.argtypes = [c_void_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_uint32]
+    page = 0x1000
+    size = ((ctypes.sizeof(FilterRecord) + page - 1) // page) * page
+    base = k32.VirtualAlloc(None, size, _TR_MEM_COMMIT | _TR_MEM_RESERVE, _TR_PAGE_RW)
+    if not base:
+        raise OSError("VirtualAlloc failed for FilterRecord page")
+    return int(base), size, FilterRecord.from_address(base)
+
+
+class _FRReadTracer:
+    """Guard-page + single-step tracer; logs FilterRecord reads during one call."""
+
+    def __init__(self, base, size, log, max_reads=800):
+        self.base, self.size, self.log = base, size, log
+        self.max_reads = max_reads   # stop tracing after N reads (avoid single-stepping
+        self._stopped = False        # through pixel processing if a selector does real work)
+        self.field_map = _tr_field_map()
+        self.reads = []          # ordered field names actually READ
+        self._rearm = False
+        self._k32 = ctypes.windll.kernel32
+        self._k32.VirtualProtect.restype  = ctypes.c_int32
+        self._k32.VirtualProtect.argtypes = [c_void_p, ctypes.c_size_t,
+                                             ctypes.c_uint32, POINTER(ctypes.c_uint32)]
+        self._k32.AddVectoredExceptionHandler.restype  = c_void_p
+        self._k32.AddVectoredExceptionHandler.argtypes = [ctypes.c_uint32, _PVEH_T]
+        self._k32.RemoveVectoredExceptionHandler.restype  = ctypes.c_uint32
+        self._k32.RemoveVectoredExceptionHandler.argtypes = [c_void_p]
+        self._handle = None
+        self._handler = _PVEH_T(self._veh)
+
+    def _veh(self, pexc):
+        try:
+            ep = _TR_EXC_POINTERS.from_address(pexc)
+            er = ep.ExceptionRecord
+            code = ctypes.c_uint32.from_address(er).value
+            if code == _TR_GUARD_PAGE:
+                acc   = ctypes.c_uint64.from_address(er + _TR_EXCINFO0).value  # 0=read 1=write
+                fault = ctypes.c_uint64.from_address(er + _TR_EXCINFO1).value
+                if self.base <= fault < self.base + self.size:
+                    off = fault - self.base
+                    nm  = _tr_name_at(self.field_map, off)
+                    if acc == 0:
+                        self.reads.append(nm)
+                        self.log(f"[8bf][FRtrace] READ  off={off:>3} field={nm}")
+                    else:
+                        self.log(f"[8bf][FRtrace] WRITE off={off:>3} field={nm}")
+                    # single-step the re-executed instruction, then re-arm the guard —
+                    # unless we've hit the read cap, in which case stop tracing and let
+                    # the rest of the selector run at full speed.
+                    ef = ctypes.c_uint32.from_address(ep.ContextRecord + _TR_CTX_EFLAGS)
+                    ef.value |= _TR_TRAP_FLAG
+                    if len(self.reads) >= self.max_reads and not self._stopped:
+                        self._stopped = True
+                        self.log(f"[8bf][FRtrace] read cap {self.max_reads} reached — "
+                                 f"tracing stopped, selector continues untraced")
+                    self._rearm = not self._stopped
+                    return _TR_CONT_EXEC
+                return _TR_CONT_SEARCH
+            if code == _TR_SINGLE_STEP and self._rearm:
+                self._rearm = False
+                self._arm()
+                return _TR_CONT_EXEC
+        except Exception:
+            return _TR_CONT_SEARCH
+        return _TR_CONT_SEARCH
+
+    def _arm(self):
+        old = ctypes.c_uint32(0)
+        self._k32.VirtualProtect(c_void_p(self.base), self.size,
+                                 _TR_PAGE_RW | _TR_PAGE_GUARD, byref(old))
+
+    def __enter__(self):
+        self._handle = self._k32.AddVectoredExceptionHandler(1, self._handler)
+        self._arm()
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            old = ctypes.c_uint32(0)
+            self._k32.VirtualProtect(c_void_p(self.base), self.size, _TR_PAGE_RW, byref(old))
+        except Exception:
+            pass
+        try:
+            if self._handle:
+                self._k32.RemoveVectoredExceptionHandler(self._handle)
+        except Exception:
+            pass
+        return False
+
+
 def run_plugin_filter(
         plugin_info: PluginInfo,
         image,                     # PIL.Image.Image
@@ -1798,8 +2000,33 @@ def run_plugin_filter(
         if progress_cb:
             progress_cb(done, total)
 
+    _advance_log: list = []
+
+    def _point_data_at_inrect():
+        """Point inData/outData at the sub-rect the plugin currently requests (fr.inRect),
+        within the in-place full-image buffer. Drives both the dialog preview and tiling."""
+        t = max(0, min(int(fr.inRect_top), h))
+        l = max(0, min(int(fr.inRect_left), w))
+        base = cast(work_buf, c_void_p).value
+        off = t * row_bytes + l * 3
+        fr.inData = base + off
+        fr.inRowBytes = row_bytes
+        fr.outData = base + off
+        fr.outRowBytes = row_bytes
+
     @WINFUNCTYPE(c_int16)
     def _advance():
+        # The plugin calls advanceState() to pull the pixels for its current inRect
+        # (e.g. while building its preview). Provide them, then return noErr.
+        try:
+            _point_data_at_inrect()
+            if len(_advance_log) < 60:
+                _advance_log.append(
+                    f"in=({fr.inRect_top},{fr.inRect_left},{fr.inRect_bottom},{fr.inRect_right})"
+                    f" lo={fr.inLoPlane} hi={fr.inHiPlane}")
+        except Exception as _ae:
+            if len(_advance_log) < 60:
+                _advance_log.append(f"err:{_ae}")
         return 0
 
     # Signature: (PSPixelMap*, PSPixelRgn*, int32 dstRow, int32 dstCol, void* platData)
@@ -1822,7 +2049,22 @@ def run_plugin_filter(
     _live_refs.append(pd)
 
     # ── Build FilterRecord (corrected CS5 SDK layout) ─────────────────────────
-    fr = FilterRecord()
+    # When read-tracing, place the FilterRecord on its own page so a PAGE_GUARD can
+    # log which fields the plugin reads. addressof(fr) == page base either way, so
+    # fr_ptr below is unchanged.
+    _fr_page = None
+    _fr_page_size = 0
+    if _TRACE_FR_READS:
+        try:
+            _fr_page, _fr_page_size, fr = _tr_alloc_fr_page()
+            _log(f"[8bf][FRtrace] FilterRecord on guard page base=0x{_fr_page:x} "
+                 f"size={_fr_page_size} struct={ctypes.sizeof(FilterRecord)}")
+        except Exception as _tex:
+            _log(f"[8bf][FRtrace] page alloc failed ({_tex}); tracing disabled this run")
+            _fr_page = None
+            fr = FilterRecord()
+    else:
+        fr = FilterRecord()
     fr.serialNumber   = 0
     fr.abortProc      = cast(_test_abort, c_void_p).value
     fr.progressProc   = cast(_progress,   c_void_p).value
@@ -1873,8 +2115,9 @@ def run_plugin_filter(
     fr.floatCoord_v = 0;  fr.floatCoord_h = 0
     fr.wholeSize_v  = h;  fr.wholeSize_h  = w
 
-    fr.monitor_gammaTable = 0
-    fr.monitor_gamma      = int(2.2 * 65536)
+    # PlugInMonitor: 10 × Fixed16. Only gamma is meaningful for a flat RGB filter; the
+    # chromaticity/white/ambient entries stay 0 (zero-initialised).
+    fr.monitor_gamma = int(2.2 * 65536)   # Fixed 16.16
 
     # processEvent: plugin calls this to let the host process platform events.
     # A non-NULL stub signals "I am a proper event-driven host"; some plugins
@@ -1904,7 +2147,6 @@ def run_plugin_filter(
     _desc_holder = _make_descriptor_params()
     _live_refs.append(_desc_holder)
 
-    fr.version                   = 4   # kCurrentFilterProcsVersion (CS5/CS6)
     fr.imageServicesProcs        = 0
     fr.descriptorParameters      = addressof(_desc_holder.params)
     fr.errorString               = 0
@@ -1914,41 +2156,34 @@ def run_plugin_filter(
     fr.supportsDummyChannels     = 0
     fr.supportsAlternateLayouts  = 0
     fr.wantLayout                = 0
-    fr.filterCaseInfoCount       = 0
-    fr.filterCaseInfo            = 0
+    fr.filterCase                = pd.filterCase   # 1 = flat image, no selection
     fr.dummyPlaneValue           = 0
     fr.premiereHook              = 0
-    fr.advanceState2             = cast(_advance, c_void_p).value
     fr.supportsAbsolute          = 0
     fr.wantsAbsolute             = 0
     fr.getPropertyObsolete       = 0
-
-    fr.cannotUndo       = 0
-    fr.noAbort          = 0
-    fr.wantsMaskAsBitmap= 0
+    fr.cannotUndo                = 0
+    fr.supportsPadding           = 0
 
     fr.inPreDummyPlanes  = 0;  fr.inPostDummyPlanes  = 0
     fr.outPreDummyPlanes = 0;  fr.outPostDummyPlanes = 0
 
-    fr.inputPadding  = 0x00010000   # Fixed 1.0 = edge-extend
-    fr.outputPadding = 0x00010000
-    fr.maskPadding   = 0x00010000
-    fr.padBytes         = 0
-    fr.isFirstAlternate = 0
-    fr.inputRate        = 0x00010000   # Fixed 1.0
-    fr.maskRate         = 0x00010000   # Fixed 1.0
+    # Padding fields are int16 (not Fixed): 0 = no special edge handling.
+    fr.inputPadding   = 0
+    fr.outputPadding  = 0
+    fr.maskPadding    = 0
+    fr.samplingSupport = 0
+    fr.reservedByte    = 0
+    fr.inputRate      = 0x00010000   # Fixed 1.0
+    fr.maskRate       = 0x00010000   # Fixed 1.0
 
     fr.sSPBasic  = addressof(sp)
     fr.plugInRef = 0
+    fr.depth     = 8                 # 8 bits / channel (field was missing before)
 
-    fr.transparentIndex   = 0
-    fr.flattenedImageData = 0
-    fr.iCCprofileSize     = 0
-    fr.iCCprofileData     = 0
-    fr.canUseICCProfiles  = 0
-    fr.inDataHandling     = 0
-    fr.outDataHandling    = 0
-    fr.maskDataHandling   = 0
+    fr.iCCprofileData    = 0
+    fr.iCCprofileSize    = 0
+    fr.canUseICCProfiles = 0
 
     # Layer-plane counts: flat RGB has no layer/mask planes; all image data is
     # in the 3 non-layer planes.  inColumnBytes=3 (RGB triplet), inPlaneBytes=1.
@@ -1993,12 +2228,45 @@ def run_plugin_filter(
             _log(f"[8bf] ✗ {msg}")
             raise RuntimeError(msg) from None
 
+    def _traced_call(sel, name):
+        """_call wrapped in the FilterRecord read-tracer (when enabled)."""
+        if _TRACE_FR_READS and _fr_page:
+            try:
+                with _FRReadTracer(_fr_page, _fr_page_size, _log) as _t:
+                    _call(sel, name)
+                _log(f"[8bf][FRtrace] {name} read sequence ({len(_t.reads)}): {_t.reads[:80]}")
+                _log(f"[8bf][FRtrace] {name} last field before return: "
+                     f"{_t.reads[-1] if _t.reads else '(none)'}")
+            except Exception as _e:
+                _log(f"[8bf][FRtrace] {name} tracer error ({_e}); retrying untraced")
+                _call(sel, name)
+        else:
+            _call(sel, name)
+
     try:
         # SEL_PARAMETERS shows the plugin's settings UI.
         # The plugin blocks here until the user clicks OK or Cancel.
         _gmfn_hit_count[0] = 0   # reset before this run
         _iat_count = _patch_iat_module_filename(_dll)
         _diag_hits = _patch_iat_diagnostics(_dll, _log)
+
+        # ── FilterRecord value snapshot (what the plugin will see on Parameters) ──
+        def _fv(n):
+            try:
+                return getattr(fr, n)
+            except Exception:
+                return "?"
+        _log("[8bf][FRsnap] vals " + "  ".join(f"{n}={_fv(n)}" for n in (
+            "imageMode", "depth", "filterCase", "planes", "inNonLayerPlanes",
+            "outNonLayerPlanes", "imageSize_h", "imageSize_v",
+            "filterRect_right", "filterRect_bottom")))
+        _log("[8bf][FRsnap] ptrs " + "  ".join(f"{n}={('0x%x' % (_fv(n) or 0))}" for n in (
+            "sSPBasic", "bufferProcs", "handleProcs", "resourceProcs", "propertyProcs",
+            "imageServicesProcs", "channelPortProcs", "colorServices",
+            "descriptorParameters", "processEvent", "advanceState")))
+        _log("[8bf][FRsnap] NULL suites/procs the plugin may require: " + ", ".join(
+            n for n in ("resourceProcs", "propertyProcs", "imageServicesProcs",
+                        "channelPortProcs", "colorServices") if not (_fv(n) or 0)))
 
         # ── WH_CBT hook: fires on ANY window creation in this thread,
         #    regardless of IAT patching or cached function pointers ────────────
@@ -2102,7 +2370,19 @@ def run_plugin_filter(
                 5, _cbt_proc, None, _k32b.GetCurrentThreadId())
             _log(f"[8bf] params_thread cbt_hook=0x{_local_hook or 0:x}")
             try:
-                _call(SEL_PARAMETERS, "PARAMETERS")
+                if _TRACE_FR_READS and _fr_page:
+                    try:
+                        with _FRReadTracer(_fr_page, _fr_page_size, _log) as _frt:
+                            _call(SEL_PARAMETERS, "PARAMETERS")
+                        _log(f"[8bf][FRtrace] read sequence ({len(_frt.reads)}): "
+                             f"{_frt.reads}")
+                        _log(f"[8bf][FRtrace] last field read before return: "
+                             f"{_frt.reads[-1] if _frt.reads else '(none — never read FilterRecord)'}")
+                    except Exception as _trex:
+                        _log(f"[8bf][FRtrace] tracer error ({_trex}); retrying untraced")
+                        _call(SEL_PARAMETERS, "PARAMETERS")
+                else:
+                    _call(SEL_PARAMETERS, "PARAMETERS")
 
                 # Some plugins show a modeless/child dialog and return from
                 # SEL_PARAMETERS immediately — the dialog lives as a child of
@@ -2260,7 +2540,7 @@ def run_plugin_filter(
                 f"Plugin returned error {result.value} on Parameters\n"
                 f"[log: {_log_path}]")
 
-        _call(SEL_PREPARE, "PREPARE")
+        _traced_call(SEL_PREPARE, "PREPARE")
         if result.value != noErr:
             raise RuntimeError(
                 f"Plugin refused to run (SEL_PREPARE returned {result.value})\n"
@@ -2270,11 +2550,12 @@ def run_plugin_filter(
                 f"[log: {_log_path}]"
             )
 
-        _ir_top_before    = fr.inRect_top
-        _ir_bottom_before = fr.inRect_bottom
-
-        _call(SEL_START, "START")
+        _traced_call(SEL_START, "START")
         _log(f"[8bf] after START: cbt_events={_cbt_events}")
+        _log(f"[8bf] after START inRect=({fr.inRect_top},{fr.inRect_left},"
+             f"{fr.inRect_bottom},{fr.inRect_right}) "
+             f"outRect=({fr.outRect_top},{fr.outRect_left},{fr.outRect_bottom},{fr.outRect_right}) "
+             f"planes={fr.inLoPlane}-{fr.inHiPlane}  advance_calls={len(_advance_log)}")
         if result.value == userCanceledErr:
             _call(SEL_FINISH, "FINISH")
             raise RuntimeError(
@@ -2289,16 +2570,26 @@ def run_plugin_filter(
                 f"[suites_acquired={_suite_log}]\n[log: {_log_path}]"
             )
 
-        if fr.inRect_bottom < _ir_bottom_before or fr.inRect_top > _ir_top_before:
-            for _ in range(2000):
-                if fr.inRect_bottom <= fr.inRect_top:
-                    break
-                try:
-                    pm(SEL_CONTINUE, fr_ptr, byref(data_val), byref(result))
-                except Exception:
-                    break
-                if result.value != noErr:
-                    break
+        # Drive Continue while the plugin requests a non-empty region. Provide the pixels
+        # for its current inRect before each call (covers plugins that use the Continue
+        # selector rather than advanceState). The plugin shrinks/empties inRect when done.
+        # NOTE: the plugin shows its modal dialog here on the worker thread. Driving that
+        # interactively (foreground/AttachThreadInput) is the unsolved wall — see report.
+        _cont = 0
+        while (fr.inRect_bottom > fr.inRect_top and fr.inRect_right > fr.inRect_left
+               and _cont < 4000):
+            _point_data_at_inrect()
+            try:
+                pm(SEL_CONTINUE, fr_ptr, byref(data_val), byref(result))
+            except Exception as _ce:
+                _log(f"[8bf] SEL_CONTINUE crashed after {_cont} iters: {_ce}")
+                break
+            _cont += 1
+            if result.value != noErr:
+                _log(f"[8bf] SEL_CONTINUE returned {result.value} after {_cont} iters")
+                break
+        _log(f"[8bf] continue iters={_cont}  final inRect=({fr.inRect_top},{fr.inRect_left},"
+             f"{fr.inRect_bottom},{fr.inRect_right})  advance_calls={len(_advance_log)}")
 
         _call(SEL_FINISH, "FINISH")
         _log(f"[8bf] after FINISH: suites={_suite_log}  diag_hits={_diag_hits}")
@@ -2339,6 +2630,12 @@ def run_plugin_filter(
             _u32.ShowWindow(c_void_p(pd.hwnd), 0)   # SW_HIDE
             _u32.SetWindowPos(c_void_p(pd.hwnd), 0, -32000, -32000, 1, 1,
                               0x0010)  # SWP_NOACTIVATE — park off-screen again
+        except Exception:
+            pass
+        # Release the guard-page FilterRecord (fr is a view into it — done being read).
+        try:
+            if _fr_page:
+                ctypes.windll.kernel32.VirtualFree(c_void_p(_fr_page), 0, _TR_MEM_RELEASE)
         except Exception:
             pass
         _log_file_handle[0] = None
