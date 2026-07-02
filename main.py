@@ -44,6 +44,21 @@ def main():
         app = QApplication(sys.argv)
         app.setApplicationName("ThumbsAI")
 
+        # Application icon (title bar + taskbar). On Windows the taskbar only uses our icon
+        # if the process has an explicit AppUserModelID — otherwise it shows pythonw.exe's.
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("ThumbsAI.App")
+            except Exception:
+                pass
+        from PySide6.QtGui import QIcon
+        _assets = _HERE / "assets"
+        _icon_path = next((p for p in (_assets / "ThumbsAI.ico", _assets / "ThumbsAI.png")
+                           if p.is_file()), None)
+        if _icon_path:
+            app.setWindowIcon(QIcon(str(_icon_path)))
+
         _lock = QLockFile(str(Path.home() / ".thumbsai.lock"))
         _lock.setStaleLockTime(10000)  # break stale locks older than 10 s
         if not _lock.tryLock(500):

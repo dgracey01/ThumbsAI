@@ -17,13 +17,16 @@ and lets you browse, search, sort, and organize thousands of images without any 
 - **Favorites** — pin frequently used folders to a fast flat list that bypasses filesystem tree scanning
 - **Folder color indicators** — see at a glance which folders have been scanned, which have thumbnails, and which are watched or favorited
 - **Similarity sort** — visually reorder the grid by perceptual similarity to a selected image
+- **Culling: picks, rejects & star ratings** — flag images as **Pick** (`P`) or **Reject** (`X`) and rate them **1–5 stars** (digiKam-style); a badge overlays each thumbnail
+- **Faceted filtering** — toolbar dropdowns filter the current folder by **rating** (≥ *or* exactly N stars) and **label** (picks / rejects / unlabeled); the grid updates live as you cull
 - **Photoshop `.8bf` plugin support** — apply Photoshop-compatible filters **with their own settings dialogs**, without Photoshop, via the embedded **pspiHost** engine (32- and 64-bit filters; Redfield collection included)
 - **Image operations** — rotate, flip, resize, blur, sharpen, color balance, HSLC, denoise, and more
 - **Batch processing** — batch pipeline and batch save-as across multiple selected images
 - **Video thumbnail support** — extracts keyframes from MP4, MKV, AVI, MOV (requires FFmpeg)
 - **ZIP archive browsing** — browse images inside ZIP archives in-place
 - **Launch Apps** — configure external apps (Photoshop, A1111 img2img, upscaler, etc.) in the right-click menu
-- **Drag-to-website** — drag PNG thumbnails directly onto sites like CivitAI; embedded metadata transfers with the file
+- **Drag files between folders** — drag thumbnails onto a folder in the tree to **copy** (or **Ctrl-drag** to **move**); the database follows the file
+- **Native shell drag-out** — drag a thumbnail out to **browsers** (reverse-image search, file-upload zones), **Photoshop**, **Explorer**, or any app: ThumbsAI hands the OS the real shell file object (CF_HDROP), so the actual PNG transfers — embedded metadata and all — not just an image blob or a mis-read `file://` URL
 
 ---
 
@@ -109,15 +112,22 @@ RESTORE_DATA.bat  — restore from a previous snapshot
 
 ## Keyboard Shortcuts
 
-| Shortcut | Action |
-|----------|--------|
-| `Ctrl+,` | Open Settings |
-| `Ctrl+Q` | Quit |
-| `→` / `Space` | Next image (viewer) |
-| `←` | Previous image (viewer) |
-| `0` | Fit to window (viewer) |
-| `Esc` | Close viewer |
-| Mouse wheel | Zoom in / out (viewer) |
+| Shortcut | Action | Context |
+|----------|--------|---------|
+| `Ctrl+,` | Open Settings | Anywhere |
+| `Ctrl+Q` | Quit | Anywhere |
+| `P` | Pick — flag selected image(s) as a keeper | Grid |
+| `X` | Reject — flag selected image(s) as a reject | Grid |
+| `U` | Clear the pick/reject label | Grid |
+| `1`–`5` | Rate selected image(s) 1–5 stars | Grid |
+| `0` | Clear the star rating | Grid |
+| `→` / `Space` | Next image | Viewer |
+| `←` | Previous image | Viewer |
+| `0` | Fit to window | Viewer |
+| `Esc` | Close viewer | Viewer |
+| Mouse wheel | Zoom in / out | Viewer |
+
+> **Culling workflow:** select one or more thumbnails, tap `P` / `X` / `1`–`5` (or use the right-click menu) to flag and rate them, then use the **★ rating** and **label** dropdowns in the toolbar to filter the folder down to just your picks.
 
 ---
 
@@ -133,9 +143,10 @@ Covers installation, all features, settings reference, keyboard shortcuts, backu
 ```
 ThumbsAI/
 ├── main.py              — Entry point
-├── thumbs_window.py     — Main window
-├── thumb_grid.py        — Thumbnail grid and image viewer
-├── folder_panel.py      — Folder tree panel
+├── thumbs_window.py     — Main window (toolbar, faceted rating/label filter)
+├── thumb_grid.py        — Thumbnail grid, image viewer, culling badges, drag-out
+├── native_drag.py       — Native Windows shell file drag (CF_HDROP) for drag-to-browser/Photoshop
+├── folder_panel.py      — Folder tree panel (drop target for move/copy between folders)
 ├── tasks_panel.py       — Background task queue panel
 ├── database.py          — SQLite thumbnail cache
 ├── ai_metadata.py       — AI metadata parser and writer

@@ -175,10 +175,84 @@ QMenu::item:selected {{ background: {ACC}; color: #000; }}
 """
 
 
+class _DropTreeView(QTreeView):
+    """Folder tree that accepts ThumbsAI image files dropped onto a folder row.
+    Emits (paths, target_folder, is_copy) — Ctrl held = copy, otherwise move."""
+    files_dropped = Signal(list, str, bool)
+    _MIME = "application/x-thumbsai-files"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+
+    def _target_folder(self, pos):
+        idx = self.indexAt(pos)
+        if not idx.isValid():
+            return None
+        try:
+            p = self.model().filePath(idx)       # QFileSystemModel; favorites model has none
+        except Exception:
+            return None
+        if not p:
+            return None
+        pp = Path(p)
+        if pp.is_dir():
+            return str(pp)
+        if pp.is_file():
+            return str(pp.parent)
+        return None
+
+    def _drop_paths(self, md):
+        """File paths from a drop — the internal mime, else CF_HDROP file URLs (which is
+        how the native shell drag, and Explorer, present files)."""
+        if md.hasFormat(self._MIME):
+            try:
+                return [p for p in bytes(md.data(self._MIME)).decode("utf-8").split("\n") if p]
+            except Exception:
+                return []
+        if md.hasUrls():
+            return [u.toLocalFile() for u in md.urls() if u.isLocalFile() and u.toLocalFile()]
+        return []
+
+    def _accepts(self, md):
+        return md.hasFormat(self._MIME) or md.hasUrls()
+
+    def dragEnterEvent(self, e):
+        if self._accepts(e.mimeData()):
+            e.acceptProposedAction()
+        else:
+            super().dragEnterEvent(e)
+
+    def dragMoveEvent(self, e):
+        if self._accepts(e.mimeData()) and self._target_folder(e.position().toPoint()):
+            self.setCurrentIndex(self.indexAt(e.position().toPoint()))  # highlight the target
+            # Drag copies; Ctrl+drag moves — set the action so the cursor shows the right feedback.
+            e.setDropAction(Qt.MoveAction if (e.modifiers() & Qt.ControlModifier) else Qt.CopyAction)
+            e.accept()
+        else:
+            e.ignore()
+
+    def dropEvent(self, e):
+        md = e.mimeData()
+        if not self._accepts(md):
+            super().dropEvent(e); return
+        target = self._target_folder(e.position().toPoint())
+        if not target:
+            e.ignore(); return
+        paths = self._drop_paths(md)
+        if not paths:
+            e.ignore(); return
+        e.acceptProposedAction()
+        # Drag copies; Ctrl+drag moves → is_copy is True unless Ctrl is held.
+        self.files_dropped.emit(paths, target, not bool(e.modifiers() & Qt.ControlModifier))
+
+
 class FolderPanel(QWidget):
     folder_selected = Signal(str)
     refresh_clicked = Signal()
     watch_toggled   = Signal(str, bool)   # (path, is_now_watched)
+    files_dropped   = Signal(list, str, bool)   # (paths, target_folder, is_copy)
 
     def __init__(self, db=None, settings=None, parent=None):
         super().__init__(parent)
@@ -253,7 +327,8 @@ class FolderPanel(QWidget):
             QDir.Filter.NoDotAndDotDot |
             QDir.Filter.Drives)
 
-        self._tree = QTreeView(self)
+        self._tree = _DropTreeView(self)
+        self._tree.files_dropped.connect(self.files_dropped)   # re-emit to the main window
         self._tree.setModel(self._model)
         self._tree.setRootIndex(self._model.index(""))
         for col in range(1, self._model.columnCount()):

@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QProgressBar, QApplication, QDialog, QFileDialog, QInputDialog,
     QRubberBand, QSpinBox, QCheckBox, QSlider,
 )
-from PySide6.QtCore  import Qt, Signal, QObject, QThread, QTimer, QRectF, QPoint, QUrl, QRect, QSize, QBuffer, QIODevice, QThreadPool, QRunnable
+from PySide6.QtCore  import Qt, Signal, QObject, QThread, QTimer, QRectF, QPoint, QUrl, QRect, QSize, QBuffer, QIODevice, QThreadPool, QRunnable, QMimeData
 from PySide6.QtGui   import QPixmap, QImage, QColor, QPainter, QFont, QWheelEvent, QKeyEvent, QContextMenuEvent, QIcon, QDrag, QTransform, QPolygon
 
 from theme import (
@@ -2189,15 +2189,82 @@ def _icon_from_b64(b64: str) -> QIcon:
         return QIcon()
 
 
+def _build_launch_parts(app: dict, filepath: str) -> list[str]:
+    """Build the argv for an external app. The args template uses %1 for the image path,
+    and is commonly stored quoted (e.g. "%1"). Since we hand a LIST to Popen (which quotes
+    spaces itself), we must STRIP the user's surrounding quotes — otherwise the literal "
+    chars become part of the filename and the app can't find it."""
+    # Native (backslash) paths: Windows CreateProcess is picky about forward slashes for the
+    # executable, and apps want a native path for the image.
+    exe = os.path.normpath(app.get("exe", "")) if app.get("exe") else ""
+    fp  = os.path.normpath(filepath) if filepath else filepath
+    parts = [exe]
+    for a in (app.get("args") or "%1").split():
+        a = a.replace("%1", fp)
+        if len(a) >= 2 and a.startswith('"') and a.endswith('"'):
+            a = a[1:-1]
+        parts.append(a)
+    return parts
+
+
 def _launch_app(app: dict, filepath: str = "") -> None:
-    """Launch an external app, substituting %1 with filepath."""
-    exe  = app.get("exe", "")
-    args = app.get("args", "%1")
+    """Open the image in an external program the way Explorer / ThumbsPlus does — via the
+    Windows shell (ShellExecuteW). The shell hands the file to single-instance apps like
+    Photoshop correctly (a second Photoshop.exe spawned by subprocess often drops the path),
+    and handles spaces, file associations, and elevation. Falls back to subprocess off-Windows
+    or if the shell call fails; surfaces a dialog instead of failing silently."""
+    def _log(m):
+        try:
+            with open(os.path.join(os.path.dirname(__file__), "data", "launch_app.log"),
+                      "a", encoding="utf-8") as f:
+                f.write(m + "\n")
+        except Exception:
+            pass
+
+    exe = app.get("exe", "")
+    _log(f"--- launch  exe={exe!r}  args={app.get('args')!r}  fp={filepath!r}")
     if not exe:
-        return
-    parts = [exe] + [a.replace("%1", filepath) for a in args.split()]
-    try:
+        _log("abort: no exe"); return
+    fp     = os.path.normpath(filepath) if filepath else filepath
+    exe_n  = os.path.normpath(exe)
+    # args template (commonly "%1", quoted) becomes the program's command-line string. For
+    # ShellExecute that IS a command line, so the quotes are correct here (don't strip them).
+    params = (app.get("args") or "%1").replace("%1", fp)
+    _log(f"exe_exists={os.path.isfile(exe_n)}  exe_n={exe_n!r}  params={params!r}  os={os.name}")
+    err = None
+
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import c_void_p, c_wchar_p, c_int, c_ssize_t
+            se = ctypes.windll.shell32.ShellExecuteW
+            se.argtypes = [c_void_p, c_wchar_p, c_wchar_p, c_wchar_p, c_wchar_p, c_int]
+            se.restype  = c_ssize_t
+            rc = se(None, "open", exe_n, params, None, 1)  # SW_SHOWNORMAL
+            _log(f"ShellExecuteW -> rc={rc}")
+            if rc > 32:
+                return                      # success (HINSTANCE > 32)
+            err = f"ShellExecute error code {rc}"
+        except Exception as e:
+            err = repr(e); _log(f"ShellExecuteW EXC: {err}")
+
+    try:                                    # fallback: subprocess (quote-stripped list form)
+        parts = _build_launch_parts(app, filepath)
+        _log(f"fallback Popen parts={parts}")
         subprocess.Popen(parts)
+        _log("Popen launched ok")
+        return
+    except Exception as e:
+        err = err or repr(e); _log(f"Popen EXC: {e!r}")
+
+    _log(f"FAILED: {err}")
+    try:                                    # both failed — show why instead of silent no-op
+        from PySide6.QtWidgets import QMessageBox
+        mb = QMessageBox()
+        mb.setWindowTitle("Open With — failed")
+        mb.setText(f"Could not open the image in:\n{exe}")
+        mb.setDetailedText(f"{err}\n\nexe:  {exe}\nfile: {fp}\nargs: {app.get('args')!r}")
+        mb.exec()
     except Exception:
         pass
 
@@ -2215,6 +2282,7 @@ class ThumbCard(QFrame):
                  on_set_thumb=None,
                  on_get_plugins=None,
                  on_run_plugin=None,
+                 on_mark=None,
                  parent=None):
         super().__init__(parent)
         self._row              = dict(row)
@@ -2225,6 +2293,7 @@ class ThumbCard(QFrame):
         self._on_set_thumb     = on_set_thumb     # callable(card, thumb_bytes)
         self._on_get_plugins   = on_get_plugins   # callable() → list[PluginInfo]
         self._on_run_plugin    = on_run_plugin     # callable(PluginInfo, filepath)
+        self._on_mark          = on_mark           # callable(label=, rating=) → grid applies to selection
         self._settings         = settings
         self._on_get_selection = on_get_selection # callable() → list[ThumbCard]
         self._selected         = False
@@ -2248,6 +2317,10 @@ class ThumbCard(QFrame):
         self._img = QLabel(self)
         self._img.setFixedSize(thumb_size, thumb_size)
         self._img.setAlignment(Qt.AlignCenter)
+        # Let ALL mouse events fall through to the card. Otherwise the child label keeps the
+        # implicit mouse grab after a press on the image, so the card's mouseMoveEvent (which
+        # starts the external drag) never fires — selection works but drag silently doesn't.
+        self._img.setAttribute(Qt.WA_TransparentForMouseEvents)
         if fp_ext == ".safetensors":
             self._render_safetensors_async(row.get("filepath", ""), thumb_size)
         elif fp_ext in VIDEO_EXTS and not row.get("thumbnail"):
@@ -2267,6 +2340,7 @@ class ThumbCard(QFrame):
             f"color:{PRI};font-family:{FONT};font-size:{font_size}px;background:transparent;")
         self._name_lbl.setFixedWidth(thumb_size)
         self._name_lbl.setToolTip(name)
+        self._name_lbl.setAttribute(Qt.WA_TransparentForMouseEvents)
         v.addWidget(self._name_lbl)
 
         # ── Dimensions / source badge ─────────────────────────────────────────
@@ -2284,7 +2358,36 @@ class ThumbCard(QFrame):
             f"color:{src_color if src else SEC};"
             f"font-family:{FONT};font-size:{font_size}px;background:transparent;")
         self._info_lbl.setFixedWidth(thumb_size)
+        self._info_lbl.setAttribute(Qt.WA_TransparentForMouseEvents)
         v.addWidget(self._info_lbl)
+
+        # ── Pick/reject + star badge (overlay on the top-left of the thumbnail) ──
+        self._badge = QLabel(self)
+        self._badge.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self._badge.hide()
+        self._update_badge()
+
+    def _update_badge(self):
+        """Show a pick (✓) / reject (✗) glyph + star count over the thumbnail, read from self._row.
+        Hidden when the image is unrated and unlabeled. Called on build, row-swap, and after a mark."""
+        rating = int(self._row.get("rating") or 0)
+        label  = int(self._row.get("label") or 0)
+        glyph  = {1: "✓", 2: "✗"}.get(label, "")
+        stars  = "★" * rating if rating else ""
+        text   = (glyph + ("  " if glyph and stars else "") + stars).strip()
+        if not text:
+            self._badge.hide()
+            return
+        bg = {1: "rgba(76,175,80,0.88)", 2: "rgba(229,57,53,0.90)"}.get(label, "rgba(0,0,0,0.62)")
+        fg = "#ffffff" if label else "#FFC107"
+        self._badge.setStyleSheet(
+            f"QLabel{{background:{bg};color:{fg};border-radius:3px;padding:0px 4px;"
+            f"font-family:{FONT};font-size:{max(self._font_size, 10)}px;font-weight:bold;}}")
+        self._badge.setText(text)
+        self._badge.adjustSize()
+        self._badge.move(8, 8)
+        self._badge.show()
+        self._badge.raise_()
 
     def _set_thumb(self, data: bytes | None):
         if data:
@@ -2434,6 +2537,7 @@ class ThumbCard(QFrame):
         # Reset selection border
         self._selected = False
         self._set_border(False)
+        self._update_badge()
 
     def _set_border(self, selected: bool):
         color = ACC if selected else MUT
@@ -2474,12 +2578,54 @@ class ThumbCard(QFrame):
         if not fps:
             return
 
+        # ── Native shell drag (the Explorer / ThumbsPlus mechanism) ──────────────────
+        # Hand the OS the shell's own IDataObject for the file(s) — CF_HDROP + the rich
+        # Shell IDList / FileContents formats — via DoDragDrop. Browsers (reverse-image
+        # search, upload zones), Photoshop and Explorer all consume that real FILE, which
+        # Qt's CF_DIB / file:// drag never delivered. Internal folder drops still work:
+        # the folder panel now also reads CF_HDROP URLs. Falls back to the Qt drag below
+        # only if the native path can't run (pywin32 missing, files spanning folders).
+        try:
+            import native_drag
+            if native_drag.drag_files(fps):
+                try:
+                    with open(os.path.join(os.path.dirname(__file__), "data", "drag.log"),
+                              "a", encoding="utf-8") as _f:
+                        _f.write(f"native shell drag: files={len(fps)} ok\n")
+                except Exception:
+                    pass
+                return
+        except Exception:
+            pass
+
         mime = QMimeData()
-        mime.setUrls([QUrl.fromLocalFile(fp) for fp in fps])
-        # Explicit text/uri-list for browsers that read it directly
-        mime.setData("text/uri-list",
-                     ("\r\n".join(QUrl.fromLocalFile(fp).toString()
-                                  for fp in fps) + "\r\n").encode())
+        urls = [QUrl.fromLocalFile(fp) for fp in fps]
+        # Internal format the folder panel reads to move/copy files between folders. Browsers
+        # ignore it; it carries the real paths regardless of the image-data/URL choices below.
+        mime.setData("application/x-thumbsai-files", "\n".join(fps).encode("utf-8"))
+        image_set = False
+        if len(fps) == 1:
+            qimg = QImage(fps[0])
+            if qimg.isNull():                       # Qt can't read it → Pillow fallback
+                try:
+                    from PIL import Image as _PImage
+                    from PIL.ImageQt import ImageQt
+                    qimg = QImage(ImageQt(_PImage.open(fps[0]).convert("RGBA"))).copy()
+                except Exception:
+                    qimg = None
+            if qimg is not None and not qimg.isNull():
+                if max(qimg.width(), qimg.height()) > 4096:   # cap giant CF_DIB blobs
+                    qimg = qimg.scaled(4096, 4096, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                mime.setImageData(qimg)             # CF_DIB — a real image, no URL
+                image_set = True
+        # Attach the file (CF_HDROP) only for a multi-drag, or if the image couldn't be loaded.
+        # For a single image we send image DATA ONLY: every browser drop target consumes it
+        # (content/search insert it; upload zones synthesize a File from it), and it exposes NO
+        # file:// URL — which reverse-image-search / URL-reading handlers otherwise grab and
+        # choke on (file:/// → "about:blank#blocked"). When you need the original file itself
+        # (e.g. preserving PNG metadata for CivitAI), use Copy Image or the site's file picker.
+        if not image_set:
+            mime.setUrls(urls)
 
         drag = QDrag(self)
         drag.setMimeData(mime)
@@ -2508,7 +2654,71 @@ class ThumbCard(QFrame):
                 drag.setPixmap(scaled)
             drag.setHotSpot(QPoint(8, 8))
 
-        drag.exec(Qt.CopyAction)
+        result = drag.exec(Qt.CopyAction)
+        # Diagnostic: result == Qt.CopyAction (1) means a target accepted the drop;
+        # Qt.IgnoreAction (0) means the drag ran but nothing accepted it (dropped on a
+        # non-target, or the target rejected the formats / OS blocked it).
+        try:
+            with open(os.path.join(os.path.dirname(__file__), "data", "drag.log"),
+                      "a", encoding="utf-8") as _f:
+                _f.write(f"drag started: files={len(fps)} image_data={len(fps) == 1} "
+                         f"result={int(result)}\n")
+        except Exception:
+            pass
+
+    def _copy_image_to_clipboard(self):
+        """Put the picture on the clipboard as image data (Ctrl+V into a browser/editor).
+        Loads via Qt, falling back to Pillow for formats Qt can't read natively (AVIF, some
+        WebP, etc.). Logs each step to data/drag.log and shows a status message so failures
+        aren't silent."""
+        import traceback
+
+        def _w(m):
+            try:
+                with open(os.path.join(os.path.dirname(__file__), "data", "drag.log"),
+                          "a", encoding="utf-8") as f:
+                    f.write("[copy] " + m + "\n")
+            except Exception:
+                pass
+
+        def _status(m):
+            try:
+                self.window().statusBar().showMessage(m, 4000)
+            except Exception:
+                pass
+
+        try:
+            fp = self._row.get("filepath", "")
+            if not fp or not os.path.isfile(fp):
+                _w(f"no file: {fp!r}"); _status("Copy Image: no file"); return
+
+            img = QImage(fp)
+            if img.isNull():                       # Qt can't read it → try Pillow
+                try:
+                    from PIL import Image as _PImage
+                    from PIL.ImageQt import ImageQt
+                    img = QImage(ImageQt(_PImage.open(fp).convert("RGBA"))).copy()
+                    _w("loaded via Pillow")
+                except Exception as pe:
+                    _w("PIL load failed: " + repr(pe))
+            if img.isNull():
+                _w("image still null — cannot copy"); _status("Copy Image failed: unreadable image")
+                return
+            if max(img.width(), img.height()) > 4096:
+                img = img.scaled(4096, 4096, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+            mime = QMimeData()
+            mime.setImageData(img)                 # CF_DIB → paste as image
+            mime.setUrls([QUrl.fromLocalFile(fp)]) # CF_HDROP → paste as file (uploaders)
+            cb = QApplication.clipboard()
+            cb.setMimeData(mime)
+            got = cb.mimeData()
+            _w(f"set ok: hasImage={got.hasImage()} hasUrls={got.hasUrls()} "
+               f"formats={got.formats()}")
+            _status("Image copied — paste into the browser with Ctrl+V")
+        except Exception as e:
+            _w("EXC: " + repr(e) + "\n" + traceback.format_exc())
+            _status("Copy Image error (see data/drag.log)")
 
     def mouseDoubleClickEvent(self, e):
         self._on_open(self)
@@ -2528,8 +2738,20 @@ class ThumbCard(QFrame):
         menu.setStyleSheet(_menu_ss)
         menu.addAction("Metadata",           self._show_properties)
         menu.addSeparator()
+        # ── Pick / reject / rate (applies to the whole selection) ─────────────
+        if self._on_mark is not None:
+            menu.addAction("✓  Pick",      lambda: self._on_mark(label=1))
+            menu.addAction("✗  Reject",    lambda: self._on_mark(label=2))
+            menu.addAction("Clear label",  lambda: self._on_mark(label=0))
+            rate_menu = QMenu("Rate", menu); rate_menu.setStyleSheet(_menu_ss)
+            for _n in (5, 4, 3, 2, 1):
+                rate_menu.addAction("★" * _n, lambda checked=False, r=_n: self._on_mark(rating=r))
+            rate_menu.addAction("No rating", lambda: self._on_mark(rating=0))
+            menu.addMenu(rate_menu)
+            menu.addSeparator()
         menu.addAction("Open",              lambda: self._on_open(self))
         menu.addAction("Open in Explorer",  self._open_explorer)
+        menu.addAction("Copy Image",        self._copy_image_to_clipboard)
         # "Open With →" submenu — populated from settings.launch_apps
         apps = (self._settings.get("launch_apps") or []) if self._settings else []
         if apps:
@@ -2853,9 +3075,11 @@ class ThumbGrid(QWidget):
     scan_finished     = Signal()
     task_list_changed = Signal(list)
     folder_loaded     = Signal(str)   # emitted (on UI thread) after a folder's rows are applied
+    marks_changed     = Signal()      # emitted after a pick/reject/rating change (window re-applies filter)
 
     def __init__(self, db: ThumbsDB, settings=None, parent=None):
         super().__init__(parent)
+        self.setFocusPolicy(Qt.StrongFocus)   # receive P/X/1-5 cull shortcuts once a card is selected
         self._db           = db
         self._settings     = settings
         # Propagate ffmpeg path setting to module-level finder
@@ -3069,6 +3293,33 @@ class ThumbGrid(QWidget):
         self._update_container_size()
         self._assign_pool()
 
+    def show_new_placeholders(self, folder: str):
+        """Instantly add placeholder cards for image files on disk that aren't shown yet —
+        so newly-arrived files appear at once (file icon, no thumbnail), before the scan
+        builds thumbnails. Only acts on the folder currently displayed. ThumbsPlus-style."""
+        folder = str(Path(folder))
+        if folder != self._folder or not os.path.isdir(folder):
+            return
+        have = {os.path.normcase(r.get("filepath", "")) for r in self._rows}
+        new_rows = []
+        try:
+            with os.scandir(folder) as it:
+                for e in it:
+                    try:
+                        if not e.is_file():
+                            continue
+                    except OSError:
+                        continue
+                    if Path(e.name).suffix.lower() not in self._enabled_exts:
+                        continue
+                    if os.path.normcase(e.path) in have:
+                        continue
+                    new_rows.append({"filepath": e.path, "filename": e.name})
+        except OSError:
+            return
+        if new_rows:
+            self.append_rows(new_rows)   # placeholder cards now; thumbnails fill on scan
+
     def selected_paths(self) -> list[str]:
         """Return file paths of all currently selected items (in row order)."""
         return [r.get("filepath", "") for r in self._rows
@@ -3151,6 +3402,109 @@ class ThumbGrid(QWidget):
         self.status_changed.emit(
             f"{len(self._rows)} result{'s' if len(self._rows) != 1 else ''} "
             f"for  \"{query}\"")
+
+    def filter_view(self, folder=None, recursive: bool = False, **facets):
+        """Display a FACETED filter (rating_min / label / model / sampler / source / tag / text), scoped to
+        `folder` (the current folder by default; pass '' for all folders). Models on search(): synchronous
+        indexed query -> rows -> rebuild. Empty facets => effectively the whole (sub)folder."""
+        if self._worker and self._worker.isRunning():
+            self._worker.requestInterruption()
+        self._task_queue.clear()
+        self._task_running = False
+        self._prog.setVisible(False)
+        self.task_list_changed.emit([])
+        self._clear_grid()
+        fold = folder if folder is not None else self._folder
+        all_rows = self._db.filter_images(
+            folder=fold or "", recursive=recursive,
+            sort=self._sort, sort_dir=self._sort_dir, with_thumbnails=False, **facets)
+        self._rows = [r for r in all_rows
+                      if Path(r["filepath"]).suffix.lower() in self._enabled_exts]
+        self._rebuild_pool()
+        bits = [k for k, v in facets.items() if v not in (None, "", 0)]
+        self.status_changed.emit(
+            f"{len(self._rows)} filtered result{'s' if len(self._rows) != 1 else ''}"
+            + (f"  ({', '.join(bits)})" if bits else ""))
+
+    def set_label_selected(self, label: int) -> int:
+        """Pick/reject the current selection (or the focused card): 0=none, 1=pick, 2=reject. Writes the DB
+        and updates the in-memory rows so a label filter reflects it immediately. Returns count changed."""
+        fps = list(self._selected_fps) or ([self._anchor_fp] if self._anchor_fp else [])
+        fps = [fp for fp in fps if fp]
+        if not fps:
+            return 0
+        try:
+            self._db.set_label_many(fps, label)
+        except Exception:
+            return 0
+        s = set(fps)
+        for r in self._rows:
+            if r.get("filepath") in s:
+                r["label"] = label
+        return len(fps)
+
+    def set_rating_selected(self, rating: int) -> int:
+        """Set the star rating (0-5) on the current selection (or focused card). Writes the DB + the
+        in-memory rows so a rating filter reflects it immediately. Returns count changed."""
+        fps = [fp for fp in (list(self._selected_fps) or [self._anchor_fp]) if fp]
+        if not fps:
+            return 0
+        rating = max(0, min(5, int(rating)))
+        try:
+            for fp in fps:
+                self._db.update_rating(fp, rating)
+        except Exception:
+            return 0
+        s = set(fps)
+        for r in self._rows:
+            if r.get("filepath") in s:
+                r["rating"] = rating
+        return len(fps)
+
+    def keyPressEvent(self, e):
+        """digiKam-style cull keys on the current selection: P=pick, X=reject, U=clear label,
+        0-5=star rating. Anything else falls through (scrolling etc.)."""
+        t = e.text().lower()
+        if t == "p":
+            self._mark(label=1)
+        elif t == "x":
+            self._mark(label=2)
+        elif t == "u":
+            self._mark(label=0)
+        elif t in ("0", "1", "2", "3", "4", "5"):
+            self._mark(rating=int(t))
+        else:
+            super().keyPressEvent(e)
+            return
+        e.accept()
+
+    def _mark(self, label=None, rating=None):
+        """Apply a pick/reject (label) or star rating to the selection, refresh just those cards' badges,
+        and tell the window to re-apply its filter (the window only re-queries if a filter is active)."""
+        fps = {fp for fp in (list(self._selected_fps) or [self._anchor_fp]) if fp}
+        if label is not None:
+            n = self.set_label_selected(label)
+            word = {0: "cleared the label on", 1: "picked", 2: "rejected"}[label]
+        else:
+            n = self.set_rating_selected(rating)
+            word = (f"rated {rating}★" if rating else "cleared the rating on")
+        if not n:
+            self.status_changed.emit("Select one or more images first")
+            return
+        self._refresh_marks(fps)          # only the changed cards repaint their badge — no grid rebuild
+        self.marks_changed.emit()
+        self.status_changed.emit(f"{word} {n} image{'s' if n != 1 else ''}")
+
+    def _refresh_marks(self, fps=None):
+        """Update the pick/reject/star badge on the visible cards (no-op until ThumbCard has _update_badge)."""
+        s = set(fps) if fps else None
+        for c in self._card_pool:
+            if not c.isVisible():
+                continue
+            if s is not None and c._row.get("filepath") not in s:
+                continue
+            if hasattr(c, "_update_badge"):
+                c._update_badge()
 
     def set_thumb_size(self, size: int):
         self._thumb_size = size
@@ -3537,6 +3891,7 @@ class ThumbGrid(QWidget):
                 on_set_thumb=self._on_custom_thumb,
                 on_get_plugins=self._get_plugins,
                 on_run_plugin=self._on_run_plugin,
+                on_mark=self._mark,
                 parent=self._container)
             card.hide()
             self._card_pool.append(card)
@@ -3829,6 +4184,7 @@ class ThumbGrid(QWidget):
         fp = card._row.get("filepath", "")
         if not fp:
             return
+        self.setFocus()      # route subsequent P/X/1-5 cull keys to the grid
         ctrl  = bool(modifiers & Qt.ControlModifier)
         shift = bool(modifiers & Qt.ShiftModifier)
 

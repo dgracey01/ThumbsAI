@@ -6,6 +6,7 @@ Layout:  Folder Tree  |  Thumbnail Grid
 Toolbar: Path bar, Sort, Thumb Size slider, Search, Refresh
 """
 from __future__ import annotations
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -1013,6 +1014,15 @@ class ThumbsWindow(QMainWindow):
         self._watcher.directoryChanged.connect(self._on_dir_changed)
         self._watcher_timer.timeout.connect(self._on_watcher_flush)
 
+        # Polling fallback — QFileSystemWatcher does NOT fire on mapped/network drives, so
+        # periodically diff the Watched Folders' file lists and route any change through the
+        # same debounced scan path. Cheap (filename-only scandir); seeds silently on first run.
+        self._poll_snapshot: dict[str, frozenset] = {}
+        self._poll_timer = QTimer(self)
+        self._poll_timer.setInterval(8000)   # 8 s
+        self._poll_timer.timeout.connect(self._poll_watched_folders)
+        self._poll_timer.start()
+
         root = QWidget()
         root.setStyleSheet(f"background:{BG};")
         self.setCentralWidget(root)
@@ -1342,6 +1352,31 @@ class ThumbsWindow(QMainWindow):
         szh.addWidget(self._size_lbl)
         h.addWidget(sz_grp)
 
+        # ── Faceted filter (folder-scoped): minimum rating + pick/reject ──────
+        _fstyle = (f"QComboBox{{background:{CAR};color:{PRI};border:1px solid {MUT};border-radius:4px;"
+                   f"padding:1px 6px;font-family:{FONT};font-size:{FONT_SM}px;}}")
+        self._filter_rating_op = QPushButton("≥", bar); self._filter_rating_op.setCheckable(True)
+        self._filter_rating_op.setFixedSize(24, 24)
+        self._filter_rating_op.setToolTip("Rating match: ≥ (this many and up) / = (exactly this many)")
+        self._filter_rating_op.setStyleSheet(
+            f"QPushButton{{background:{CAR};color:{PRI};border:1px solid {MUT};border-radius:4px;"
+            f"font-family:{FONT};font-size:{FONT_MD}px;font-weight:bold;}}"
+            f"QPushButton:checked{{background:{ACC};color:white;}}")
+        self._filter_rating_op.toggled.connect(self._on_rating_op_toggled)
+        h.addWidget(self._filter_rating_op)
+        self._filter_rating = QComboBox(bar); self._filter_rating.setFixedHeight(24)
+        self._filter_rating.addItems(["★ any", "★ 1", "★ 2", "★ 3", "★ 4", "★ 5"])
+        self._filter_rating.setStyleSheet(_fstyle)
+        self._filter_rating.setToolTip("Filter by rating — use the ≥/= toggle for 'and up' vs exact")
+        self._filter_rating.currentIndexChanged.connect(self._apply_filter)
+        h.addWidget(self._filter_rating)
+        self._filter_label = QComboBox(bar); self._filter_label.setFixedHeight(24)
+        self._filter_label.addItems(["label: all", "✓ picks", "✗ rejects", "unlabeled"])
+        self._filter_label.setStyleSheet(_fstyle)
+        self._filter_label.setToolTip("Show only picks / rejects / unlabeled")
+        self._filter_label.currentIndexChanged.connect(self._apply_filter)
+        h.addWidget(self._filter_label)
+
         h.addStretch()
 
         # Search (pinned to the right)
@@ -1385,6 +1420,7 @@ class ThumbsWindow(QMainWindow):
         self._folder_panel.folder_selected.connect(self._on_folder_selected)
         self._folder_panel.refresh_clicked.connect(self._on_refresh)
         self._folder_panel.watch_toggled.connect(self._on_watch_toggled)
+        self._folder_panel.files_dropped.connect(self._on_files_dropped)
         left_vbox.addWidget(self._folder_panel, stretch=1)
 
         self._tasks_panel = TasksPanel()
@@ -1402,6 +1438,7 @@ class ThumbsWindow(QMainWindow):
         self._grid.scan_finished.connect(self._folder_panel.refresh_colors)
         self._grid.task_list_changed.connect(self._tasks_panel.update_tasks)
         self._grid.folder_loaded.connect(self._merge_thumbsplus_rows)
+        self._grid.marks_changed.connect(self._on_marks_changed)   # re-query ONLY if a filter is active
         self._tasks_panel.quit_task.connect(self._grid.cancel_task)
         self._tasks_panel.quit_all_tasks.connect(self._grid.cancel_all_tasks)
         self._splitter.addWidget(self._grid)
@@ -1436,11 +1473,61 @@ class ThumbsWindow(QMainWindow):
 
     # ── Slots ─────────────────────────────────────────────────────────────────
 
+    def _on_files_dropped(self, paths: list, target_folder: str, is_copy: bool):
+        """Drag-and-drop from the grid onto a folder in the tree: copy (or Ctrl=move) the
+        files, keep the DB/thumbnail cache in sync, then refresh the source view + colors."""
+        import os, shutil
+        target = os.path.normpath(target_folder)
+        if not os.path.isdir(target):
+            return
+        done, skipped = 0, []
+        for src in paths:
+            try:
+                if not os.path.isfile(src):
+                    continue
+                if os.path.normcase(os.path.dirname(os.path.normpath(src))) == os.path.normcase(target):
+                    continue   # already in the target folder
+                dest = os.path.join(target, os.path.basename(src))
+                if os.path.exists(dest):
+                    skipped.append(os.path.basename(src)); continue
+                if is_copy:
+                    shutil.copy2(src, dest)
+                else:
+                    shutil.move(src, dest)
+                    try:
+                        self._db.move_path(src, dest)   # preserve cached thumbnail/metadata
+                    except Exception:
+                        pass
+                done += 1
+            except Exception as exc:
+                skipped.append(f"{os.path.basename(src)} ({exc})")
+        # Refresh AFTER the drag fully unwinds: this slot runs inside the source ThumbCard's
+        # drag.exec(), so reloading the grid now would destroy that card mid-drag (crash).
+        from PySide6.QtCore import QTimer
+
+        def _refresh():
+            if done and not is_copy and getattr(self, "_current_folder", ""):
+                self._grid.load_folder(self._current_folder)   # moved thumbs vanish from source
+            try:
+                self._folder_panel.refresh_colors()
+            except Exception:
+                pass
+        QTimer.singleShot(0, _refresh)
+        verb = "Copied" if is_copy else "Moved"
+        msg  = f"{verb} {done} image(s) → {target}"
+        if skipped:
+            msg += f"  ({len(skipped)} skipped — already present / not a file)"
+        try:
+            self.statusBar().showMessage(msg, 6000)
+        except Exception:
+            pass
+
     def _on_folder_selected(self, path: str):
         self._search_edit.blockSignals(True)
         self._search_edit.clear()
         self._search_edit.blockSignals(False)
         self._current_folder = path
+        self._reset_filter_ui()
         self._grid.load_folder(path)
         # ThumbsPlus Read-Only merge runs in _merge_thumbsplus_rows, fired by the
         # grid's folder_loaded signal once the async DB load completes (so the
@@ -1457,6 +1544,37 @@ class ThumbsWindow(QMainWindow):
         # Defer watcher rebuild so the folder renders before the blocking
         # iterdir() + addPaths() calls freeze the event loop.
         QTimer.singleShot(0, lambda p=path: self._update_watcher(p))
+
+    def _reset_filter_ui(self):
+        """Drop the rating/label facets back to 'all' (called when the folder changes)."""
+        for cb in (getattr(self, "_filter_rating", None), getattr(self, "_filter_label", None)):
+            if cb is not None:
+                cb.blockSignals(True); cb.setCurrentIndex(0); cb.blockSignals(False)
+
+    def _on_marks_changed(self):
+        """A pick/reject/rating changed. Re-apply the filter ONLY if one is active — otherwise the in-place
+        badge update is enough, and a full folder reload (which flickers the whole grid) is avoided."""
+        if self._filter_rating.currentIndex() != 0 or self._filter_label.currentIndex() != 0:
+            self._apply_filter()
+
+    def _on_rating_op_toggled(self, checked: bool):
+        """Flip the rating comparator ≥ <-> = and re-apply (only matters when a rating is selected)."""
+        self._filter_rating_op.setText("=" if checked else "≥")
+        if self._filter_rating.currentIndex() != 0:
+            self._apply_filter()
+
+    def _apply_filter(self):
+        """Re-display the current folder filtered by the rating + pick/reject facets (folder-scoped)."""
+        folder = getattr(self, "_current_folder", "")
+        if not folder:
+            return
+        ri = self._filter_rating.currentIndex()                     # 0=any .. 5
+        op = "=" if self._filter_rating_op.isChecked() else ">="    # exact vs 'and up'
+        label = (None, 1, 2, 0)[self._filter_label.currentIndex()]  # all / picks / rejects / unlabeled
+        if ri == 0 and label is None:
+            self._grid.load_folder(folder)                          # no facets -> normal folder view
+        else:
+            self._grid.filter_view(rating_min=ri, rating_op=op, label=label)
 
     def _merge_thumbsplus_rows(self, folder: str):
         """Merge ThumbsPlus images not already in ThumbsAI (Read Only mode).
@@ -1831,10 +1949,13 @@ class ThumbsWindow(QMainWindow):
         self._watcher_pending.clear()
         self._watcher_timer.stop()
 
-        auto_scan = self._settings.get("auto_scan", True)
+        # Read-Only mode disables all watching. Auto-scan-on-click only gates Tier 1
+        # (the current folder); explicitly-marked Watched Folders (Tier 2) are always
+        # monitored — that is the whole point of marking them.
         readonly  = self._settings.get("thumbsplus_mode") == "readonly"
-        if not auto_scan or readonly:
+        if readonly:
             return
+        auto_scan = self._settings.get("auto_scan", True)
 
         to_watch: list[str] = []
 
@@ -1856,11 +1977,11 @@ class ThumbsWindow(QMainWindow):
             except OSError:
                 pass
 
-        # Tier 1: current folder (never watch a bare drive root)
-        if not self._is_drive_root(folder):
+        # Tier 1: current folder (never watch a bare drive root) — only with auto-scan-on-click
+        if auto_scan and not self._is_drive_root(folder):
             _add_with_subdirs(folder)
 
-        # Tier 2: always-watched folders
+        # Tier 2: always-watched folders — monitored regardless of auto_scan
         for wf in (self._settings.get("watched_folders") or []):
             if len(to_watch) >= self._MAX_WATCH_PATHS:
                 break
@@ -1902,7 +2023,58 @@ class ThumbsWindow(QMainWindow):
             # Scan the changed folder; _on_worker_finished only refreshes the
             # grid when scanned == self._folder, so other folders update silently.
             if not self._is_drive_root(path):
-                self._grid.scan_folder(path)
+                self._handle_folder_change(path)
+
+    def _handle_folder_change(self, path: str):
+        """A watched/current folder changed: if we're viewing it, show the new files at once
+        as placeholder cards (ThumbsPlus-style), then scan to build their thumbnails."""
+        try:
+            cur = os.path.normcase(os.path.normpath(self._current_folder or ""))
+            if cur and os.path.normcase(os.path.normpath(path)) == cur:
+                self._grid.show_new_placeholders(path)
+        except Exception:
+            pass
+        self._grid.scan_folder(path)
+
+    def _poll_dirs(self) -> list[str]:
+        """Watched-folder roots + their immediate subdirs (the scan scope), capped."""
+        dirs: list[str] = []
+        for wf in (self._settings.get("watched_folders") or []):
+            if len(dirs) >= self._MAX_WATCH_PATHS:
+                break
+            if not wf or not os.path.isdir(wf) or wf in dirs:
+                continue
+            dirs.append(wf)
+            try:
+                with os.scandir(wf) as it:
+                    for e in it:
+                        if len(dirs) >= self._MAX_WATCH_PATHS:
+                            break
+                        try:
+                            if e.is_dir(follow_symlinks=False) and e.path not in dirs:
+                                dirs.append(e.path)
+                        except OSError:
+                            pass
+            except OSError:
+                pass
+        return dirs
+
+    def _poll_watched_folders(self):
+        """Polling fallback for Watched Folders on network drives (where QFileSystemWatcher
+        is silent). Diffs each folder's file list; queues changed ones through the same
+        debounced flush as the watcher (set-dedup avoids double-scanning local folders)."""
+        if self._settings.get("thumbsplus_mode") == "readonly":
+            return
+        for d in self._poll_dirs():
+            try:
+                names = frozenset(e.name for e in os.scandir(d) if e.is_file())
+            except OSError:
+                continue
+            prev = self._poll_snapshot.get(d)
+            self._poll_snapshot[d] = names
+            if prev is not None and names != prev:
+                self._watcher_pending.add(d)
+                self._watcher_timer.start()
 
     def _on_tasks_panel_close(self):
         """User clicked ✕ on the tasks panel — hide it and save setting."""
@@ -1922,21 +2094,18 @@ class ThumbsWindow(QMainWindow):
             self._app_btns_layout.addWidget(btn)
 
     def _launch_app(self, app: dict):
-        """Launch app, using current selected image as %1."""
-        import subprocess
-        fp  = ""
-        sel = getattr(self._grid, "_selected", None)
-        if sel is not None:
-            fp = sel._row.get("filepath", "")
-        exe  = app.get("exe", "")
-        args = app.get("args", "%1")
-        if not exe:
-            return
-        parts = [exe] + [a.replace("%1", fp) for a in args.split()]
+        """Launch app with the currently-selected image (shared ShellExecute launcher).
+        Selection lives in the grid's _selected_fps, exposed via selected_paths(); the old
+        self._grid._selected attribute didn't exist, so the file was never passed."""
+        from thumb_grid import _launch_app as _grid_launch_app
         try:
-            subprocess.Popen(parts)
-        except Exception as exc:
-            self._on_status(f"Launch failed: {exc}")
+            paths = self._grid.selected_paths() or []
+        except Exception:
+            paths = []
+        if not paths:
+            self._on_status("Select an image first, then click the app button.")
+            return
+        _grid_launch_app(app, paths[0])
 
     def _restore_folder(self, folder: str):
         import os

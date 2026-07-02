@@ -219,6 +219,7 @@ class ThumbsDB:
         existing = {r[1] for r in self._c.execute("PRAGMA table_info(images)").fetchall()}
         additions = [
             ("file_hash", "TEXT"),
+            ("label", "INTEGER DEFAULT 0"),   # pick/reject (digiKam-style): 0=none, 1=pick/keep, 2=reject
         ]
         for col, coltype in additions:
             if col not in existing:
@@ -229,42 +230,50 @@ class ThumbsDB:
         self._c.executescript("""
             CREATE INDEX IF NOT EXISTS idx_folder_name ON images(folder, filename COLLATE NOCASE);
             CREATE INDEX IF NOT EXISTS idx_file_hash   ON images(file_hash);
+            CREATE INDEX IF NOT EXISTS idx_label       ON images(label);
         """)
         self._c.commit()
 
     def _migrate_fts5(self):
-        """Create FTS5 full-text-search table + sync triggers (idempotent)."""
-        tables = {r[0] for r in self._c.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-        if "images_fts" in tables:
-            return
+        """Create/UPGRADE the FTS5 full-text index over ALL searchable columns + sync triggers (idempotent).
+        Older DBs indexed only filename/prompt/tags; this rebuilds them to also cover negative_prompt,
+        model, seed, and sampler so the (now single) FTS-backed search() matches the legacy LIKE coverage."""
+        has_fts = self._c.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='images_fts'").fetchone()
+        if has_fts:
+            cols = {r[1].lower() for r in self._c.execute("PRAGMA table_info(images_fts)").fetchall()}
+            if "model" in cols:
+                return   # already the expanded schema
         self._c.executescript("""
+            DROP TRIGGER IF EXISTS images_fts_ai;
+            DROP TRIGGER IF EXISTS images_fts_ad;
+            DROP TRIGGER IF EXISTS images_fts_au;
+            DROP TABLE IF EXISTS images_fts;
             CREATE VIRTUAL TABLE images_fts USING fts5(
-                filename, prompt, tags,
+                filename, prompt, negative_prompt, model, seed, sampler, tags,
                 content=images, content_rowid=id
             );
-            -- Populate from existing rows
-            INSERT INTO images_fts(rowid, filename, prompt, tags)
-                SELECT id, coalesce(filename,''), coalesce(prompt,''),
-                       coalesce(tags,'') FROM images;
-            -- Keep in sync with images
+            INSERT INTO images_fts(rowid, filename, prompt, negative_prompt, model, seed, sampler, tags)
+                SELECT id, coalesce(filename,''), coalesce(prompt,''), coalesce(negative_prompt,''),
+                       coalesce(model,''), coalesce(seed,''), coalesce(sampler,''), coalesce(tags,'')
+                FROM images;
             CREATE TRIGGER images_fts_ai AFTER INSERT ON images BEGIN
-                INSERT INTO images_fts(rowid, filename, prompt, tags)
-                VALUES (new.id, coalesce(new.filename,''),
-                        coalesce(new.prompt,''), coalesce(new.tags,''));
+                INSERT INTO images_fts(rowid, filename, prompt, negative_prompt, model, seed, sampler, tags)
+                VALUES (new.id, coalesce(new.filename,''), coalesce(new.prompt,''), coalesce(new.negative_prompt,''),
+                        coalesce(new.model,''), coalesce(new.seed,''), coalesce(new.sampler,''), coalesce(new.tags,''));
             END;
             CREATE TRIGGER images_fts_ad AFTER DELETE ON images BEGIN
-                INSERT INTO images_fts(images_fts, rowid, filename, prompt, tags)
-                VALUES ('delete', old.id, coalesce(old.filename,''),
-                        coalesce(old.prompt,''), coalesce(old.tags,''));
+                INSERT INTO images_fts(images_fts, rowid, filename, prompt, negative_prompt, model, seed, sampler, tags)
+                VALUES ('delete', old.id, coalesce(old.filename,''), coalesce(old.prompt,''), coalesce(old.negative_prompt,''),
+                        coalesce(old.model,''), coalesce(old.seed,''), coalesce(old.sampler,''), coalesce(old.tags,''));
             END;
             CREATE TRIGGER images_fts_au AFTER UPDATE ON images BEGIN
-                INSERT INTO images_fts(images_fts, rowid, filename, prompt, tags)
-                VALUES ('delete', old.id, coalesce(old.filename,''),
-                        coalesce(old.prompt,''), coalesce(old.tags,''));
-                INSERT INTO images_fts(rowid, filename, prompt, tags)
-                VALUES (new.id, coalesce(new.filename,''),
-                        coalesce(new.prompt,''), coalesce(new.tags,''));
+                INSERT INTO images_fts(images_fts, rowid, filename, prompt, negative_prompt, model, seed, sampler, tags)
+                VALUES ('delete', old.id, coalesce(old.filename,''), coalesce(old.prompt,''), coalesce(old.negative_prompt,''),
+                        coalesce(old.model,''), coalesce(old.seed,''), coalesce(old.sampler,''), coalesce(old.tags,''));
+                INSERT INTO images_fts(rowid, filename, prompt, negative_prompt, model, seed, sampler, tags)
+                VALUES (new.id, coalesce(new.filename,''), coalesce(new.prompt,''), coalesce(new.negative_prompt,''),
+                        coalesce(new.model,''), coalesce(new.seed,''), coalesce(new.sampler,''), coalesce(new.tags,''));
             END;
         """)
         self._c.commit()
@@ -277,26 +286,38 @@ class ThumbsDB:
         self._c.execute("PRAGMA wal_checkpoint(PASSIVE)")
 
     def search(self, query: str, folder: str = "") -> list[dict]:
-        """FTS5 full-text search across filename, prompt, tags. O(log N)."""
+        """FTS5 full-text search across filename/prompt/negative/model/seed/sampler/tags (O(log N), indexed),
+        thumbnails joined. Terms are AND-ed. Falls back to a LIKE scan if the FTS query won't parse."""
         q = query.strip()
         if not q:
             return []
-        fts_q = " OR ".join(f'"{w}"' for w in q.split())
-        sql = (
-            "SELECT i.* FROM images i "
-            "JOIN images_fts f ON f.rowid = i.id "
-            "WHERE images_fts MATCH ?"
-        )
+        fts_q = " ".join(f'"{w}"' for w in q.split())     # quote/escape each term; space = implicit AND
+        sql = ("SELECT i.*, t.data AS thumbnail FROM images_fts f "
+               "JOIN images i ON i.id = f.rowid "
+               "LEFT JOIN thumbnails t ON t.image_id = i.id "
+               "WHERE images_fts MATCH ?")
         params: list = [fts_q]
         if folder:
-            sql += " AND i.folder=?"
+            sql += " AND i.folder = ?"
             params.append(folder)
-        sql += " ORDER BY rank LIMIT 2000"
+        sql += " ORDER BY rank LIMIT 5000"
         try:
-            rows = self._c.execute(sql, params).fetchall()
-            return [dict(r) for r in rows]
+            return [dict(r) for r in self._c.execute(sql, params).fetchall()]
         except Exception:
-            return []
+            like = f"%{query}%"
+            base = ("SELECT i.*, t.data AS thumbnail FROM images i "
+                    "LEFT JOIN thumbnails t ON t.image_id=i.id WHERE ")
+            cond = ("(i.filename LIKE ? OR i.prompt LIKE ? OR i.model LIKE ? OR i.seed LIKE ? "
+                    "OR i.sampler LIKE ? OR i.tags LIKE ?)")
+            fp = [like] * 6
+            if folder:
+                cond = "i.folder=? AND " + cond
+                fp = [folder] + fp
+            try:
+                return [dict(r) for r in self._c.execute(
+                    base + cond + " ORDER BY i.filename COLLATE NOCASE", fp).fetchall()]
+            except Exception:
+                return []
 
     # ── Write ─────────────────────────────────────────────────────────────────
 
@@ -338,6 +359,16 @@ class ThumbsDB:
                 "ON CONFLICT(image_id) DO UPDATE SET data=excluded.data",
                 (image_id, thumbnail))
 
+        self._c.commit()
+
+    def move_path(self, old_fp: str, new_fp: str) -> None:
+        """Update a row's path after the file moved on disk, preserving the cached thumbnail
+        and metadata (the thumbnail is keyed by image_id, which doesn't change)."""
+        new_name   = Path(new_fp).name
+        new_folder = str(Path(new_fp).parent)
+        self._c.execute(
+            "UPDATE images SET filepath=?, filename=?, folder=? WHERE filepath=?",
+            (new_fp, new_name, new_folder, old_fp))
         self._c.commit()
 
     def batch_upsert(self, records: list[dict], commit: bool = True) -> None:
@@ -414,6 +445,26 @@ class ThumbsDB:
         self._c.execute(
             "UPDATE images SET rating=? WHERE filepath=?", (rating, filepath))
         self._c.commit()
+
+    def update_label(self, filepath: str, label: int):
+        """Pick/reject label: 0=none, 1=pick/keep, 2=reject (digiKam-style culling)."""
+        self._c.execute(
+            "UPDATE images SET label=? WHERE filepath=?", (int(label), filepath))
+        self._c.commit()
+
+    def set_label_many(self, filepaths: list[str], label: int) -> int:
+        """Bulk pick/reject across a selection, one transaction. Returns rows changed."""
+        if not filepaths:
+            return 0
+        changed = 0
+        for i in range(0, len(filepaths), 500):
+            chunk = filepaths[i:i + 500]
+            ph = ",".join("?" * len(chunk))
+            cur = self._c.execute(
+                f"UPDATE images SET label=? WHERE filepath IN ({ph})", [int(label)] + chunk)
+            changed += cur.rowcount
+        self._c.commit()
+        return changed
 
     def rename_filepath(self, old_path: str, new_path: str) -> None:
         new_name   = Path(new_path).name
@@ -622,30 +673,76 @@ class ThumbsDB:
 
         return rows
 
-    def search(self, query: str, folder: str = "") -> list[dict]:
-        q = f"%{query}%"
-        if folder:
-            rows = self._c.execute(
-                "SELECT i.*, t.data AS thumbnail "
-                "FROM images i LEFT JOIN thumbnails t ON t.image_id=i.id "
-                "WHERE i.folder=? AND "
-                "(i.filename LIKE ? OR i.prompt LIKE ? OR i.model LIKE ? "
-                " OR i.seed LIKE ? OR i.sampler LIKE ? OR i.tags LIKE ?) "
-                "ORDER BY i.filename COLLATE NOCASE",
-                (folder, q, q, q, q, q, q)).fetchall()
-        else:
-            rows = self._c.execute(
-                "SELECT i.*, t.data AS thumbnail "
-                "FROM images i LEFT JOIN thumbnails t ON t.image_id=i.id "
-                "WHERE i.filename LIKE ? OR i.prompt LIKE ? OR i.model LIKE ? "
-                "OR i.seed LIKE ? OR i.sampler LIKE ? OR i.tags LIKE ? "
-                "ORDER BY i.filename COLLATE NOCASE",
-                (q, q, q, q, q, q)).fetchall()
-        return [dict(r) for r in rows]
-
     def total_in_folder(self, folder: str) -> int:
         return self._c.execute(
             "SELECT COUNT(*) FROM images WHERE folder=?", (folder,)).fetchone()[0]
+
+    # ── Faceted filter (digiKam-style: combine rating/label/model/sampler/tag/text) ──────────────
+    def filter_images(self, folder: str = "", recursive: bool = False,
+                      rating_min: int = 0, rating_op: str = ">=", label=None,
+                      model: str = "", sampler: str = "", source: str = "",
+                      tag: str = "", text: str = "",
+                      sort: str = "name", sort_dir: str = "asc",
+                      with_thumbnails: bool = True, limit: int = 5000) -> list[dict]:
+        """Filter the grid by any combination of facets — empty/None facets are ignored, all others AND.
+          rating_min : rating >= N            label   : exact pick/reject (0/1/2)
+          model/sampler/source : exact match  tag     : substring in the tags column
+          text       : FTS5 match (filename/prompt/negative/model/seed/sampler/tags)
+        Every facet maps to an indexed column, so this stays fast at 100K+ rows."""
+        conds: list[str] = []
+        params: list = []
+        if folder:
+            if recursive:
+                conds.append("(i.folder=? OR i.folder LIKE ?)")
+                params += [folder, folder.rstrip("/\\") + "\\%"]
+            else:
+                conds.append("i.folder=?"); params.append(folder)
+        if rating_min:
+            conds.append("i.rating = ?" if rating_op == "=" else "i.rating >= ?")
+            params.append(int(rating_min))
+        if label is not None:
+            conds.append("i.label = ?"); params.append(int(label))
+        if model:
+            conds.append("i.model = ?"); params.append(model)
+        if sampler:
+            conds.append("i.sampler = ?"); params.append(sampler)
+        if source:
+            conds.append("i.source = ?"); params.append(source)
+        if tag:
+            conds.append("i.tags LIKE ?"); params.append(f"%{tag}%")
+        fts_join = ""
+        if text.strip():
+            fts_join = "JOIN images_fts f ON f.rowid = i.id"
+            conds.append("images_fts MATCH ?")
+            params.append(" ".join(f'"{w}"' for w in text.split()))
+        _ORD = {"name": "i.filename COLLATE NOCASE", "date": "i.added_at", "size": "i.filesize",
+                "modified": "i.modified_at", "rating": "i.rating", "label": "i.label"}
+        order = _ORD.get(sort, "i.filename COLLATE NOCASE") + (" DESC" if sort_dir == "desc" else " ASC")
+        thumb_sel  = ", t.data AS thumbnail" if with_thumbnails else ""
+        thumb_join = "LEFT JOIN thumbnails t ON t.image_id = i.id" if with_thumbnails else ""
+        where = (" WHERE " + " AND ".join(conds)) if conds else ""
+        sql = (f"SELECT i.*{thumb_sel} FROM images i {fts_join} {thumb_join}{where} "
+               f"ORDER BY {order} LIMIT ?")
+        params.append(int(limit))
+        try:
+            return [dict(r) for r in self._c.execute(sql, params).fetchall()]
+        except Exception:
+            return []
+
+    def distinct_values(self, column: str, folder: str = "") -> list[str]:
+        """Distinct values of a facet column (for populating filter dropdowns). Whitelisted columns only."""
+        if column not in ("model", "sampler", "source"):
+            return []
+        if folder:
+            rows = self._c.execute(
+                f"SELECT DISTINCT {column} FROM images WHERE folder=? "
+                f"AND {column} IS NOT NULL AND {column}!='' ORDER BY {column} COLLATE NOCASE",
+                (folder,)).fetchall()
+        else:
+            rows = self._c.execute(
+                f"SELECT DISTINCT {column} FROM images "
+                f"WHERE {column} IS NOT NULL AND {column}!='' ORDER BY {column} COLLATE NOCASE").fetchall()
+        return [r[0] for r in rows]
 
     def all_folders(self) -> list[str]:
         rows = self._c.execute(
