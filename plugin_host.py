@@ -7,16 +7,28 @@ ABI contract:  #pragma pack(2), big-endian PIPL resources,
                           int32* data, short* result)
 """
 from __future__ import annotations
-import ctypes, ctypes.wintypes, struct, os, io, sys, threading
+import ctypes, ctypes.wintypes, struct, os, sys, threading
 from ctypes import (
-    WINFUNCTYPE, c_bool, c_int8, c_uint8, c_int16, c_uint16,
-    c_int32, c_uint32, c_int64, c_double, c_void_p, c_wchar_p,
-    POINTER, Structure, byref, cast,
-    create_string_buffer, string_at, addressof,
+    WINFUNCTYPE,
+    c_bool,
+    c_uint8,
+    c_int16,
+    c_uint16,
+    c_int32,
+    c_uint32,
+    c_int64,
+    c_void_p,
+    c_wchar_p,
+    POINTER,
+    Structure,
+    byref,
+    cast,
+    create_string_buffer,
+    string_at,
+    addressof,
 )
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Optional
 
 # Shared log-file handle set by run_plugin_filter so that _eprint (used inside
 # callback closures like AcquireSuite) also writes to the per-run plugin.log.

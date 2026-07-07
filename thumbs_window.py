@@ -8,15 +8,28 @@ Toolbar: Path bar, Sort, Thumb Size slider, Search, Refresh
 from __future__ import annotations
 import os
 import shutil
-import subprocess
 from pathlib import Path
 from datetime import datetime
 
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QFrame, QLabel, QPushButton,
-    QLineEdit, QHBoxLayout, QVBoxLayout, QSplitter,
-    QSlider, QComboBox, QSizePolicy, QMenu, QSpinBox,
-    QDialog, QCheckBox, QFileDialog, QApplication, QMessageBox,
+    QMainWindow,
+    QWidget,
+    QFrame,
+    QLabel,
+    QPushButton,
+    QLineEdit,
+    QHBoxLayout,
+    QVBoxLayout,
+    QSplitter,
+    QSlider,
+    QComboBox,
+    QMenu,
+    QSpinBox,
+    QDialog,
+    QCheckBox,
+    QFileDialog,
+    QApplication,
+    QMessageBox,
     QScrollArea,
 )
 from PySide6.QtGui import QAction
@@ -24,8 +37,20 @@ from PySide6.QtCore import Qt, QTimer, QSize, QMimeData, QByteArray, QEvent, Sig
 from PySide6.QtGui  import QIcon, QDrag, QImage, QPixmap
 
 from theme import (
-    BG, PAN, CAR, ACC, GRN, RED, MUT, PRI, SEC, AMB,
-    FONT, FONT_SM, FONT_MD, FONT_LG, SIGNATURE,
+    BG,
+    PAN,
+    CAR,
+    ACC,
+    GRN,
+    RED,
+    MUT,
+    PRI,
+    SEC,
+    FONT,
+    FONT_SM,
+    FONT_MD,
+    FONT_LG,
+    SIGNATURE,
 )
 from database     import ThumbsDB
 from folder_panel import FolderPanel
@@ -1103,6 +1128,7 @@ class ThumbsWindow(QMainWindow):
     def _open_watched_folders(self):
         dlg = _WatchedFoldersDialog(self._settings, self)
         dlg.exec()
+        dlg.deleteLater()      # parented to the window — free it so dialogs don't accumulate over days
         # Sync folder panel colours and watcher regardless of how dialog closed
         self._folder_panel._model.set_watched(
             set(self._settings.get("watched_folders") or []))
@@ -1870,36 +1896,6 @@ class ThumbsWindow(QMainWindow):
             f"QPushButton:hover{{background:{hover};}}")
         return btn
 
-    def _mk_dropdown_btn(self, text: str, color: str,
-                         actions: list, min_w: int = 100) -> QPushButton:
-        """Button that opens a QMenu below itself on click."""
-        btn   = QPushButton(text)
-        btn.setMinimumWidth(min_w)
-        btn.setFixedHeight(26)
-        hover = {ACC: "#185FA5", MUT: "#555577"}.get(color, "#555577")
-        btn.setStyleSheet(
-            f"QPushButton{{background:{color};color:{PRI};border:none;"
-            f"border-radius:4px;font-family:{FONT};font-size:{FONT_SM}px;"
-            f"font-weight:bold;padding:0 8px;}}"
-            f"QPushButton:hover{{background:{hover};}}")
-        menu = QMenu(btn)
-        menu.setStyleSheet(
-            f"QMenu{{background:{CAR};color:{PRI};border:1px solid {MUT};"
-            f"font-family:{FONT};font-size:{FONT_SM}px;padding:2px;}}"
-            f"QMenu::item{{padding:6px 16px;}}"
-            f"QMenu::item:selected{{background:{ACC};}}")
-        for label, slot in actions:
-            menu.addAction(label, slot)
-        btn.clicked.connect(
-            lambda: menu.exec(btn.mapToGlobal(btn.rect().bottomLeft())))
-        return btn
-
-    def _mk_lbl(self, text: str) -> QLabel:
-        lbl = QLabel(text)
-        lbl.setStyleSheet(
-            f"color:{SEC};font-family:{FONT};font-size:{FONT_SM}px;background:transparent;")
-        return lbl
-
     def _apply_ext_settings(self):
         disabled = set(self._settings.get("disabled_extensions") or [])
         enabled  = set(SUPPORTED_EXTS) - disabled
@@ -1907,7 +1903,9 @@ class ThumbsWindow(QMainWindow):
 
     def _open_settings(self):
         dlg = _SettingsDialog(self._settings, self)
-        if dlg.exec() == QDialog.Accepted:
+        accepted = dlg.exec() == QDialog.Accepted
+        dlg.deleteLater()      # parented to the window — free it so dialogs don't accumulate over days
+        if accepted:
             self._apply_ext_settings()
             self._rebuild_app_btns()
             self._tasks_panel.set_enabled(

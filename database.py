@@ -446,12 +446,6 @@ class ThumbsDB:
             "UPDATE images SET rating=? WHERE filepath=?", (rating, filepath))
         self._c.commit()
 
-    def update_label(self, filepath: str, label: int):
-        """Pick/reject label: 0=none, 1=pick/keep, 2=reject (digiKam-style culling)."""
-        self._c.execute(
-            "UPDATE images SET label=? WHERE filepath=?", (int(label), filepath))
-        self._c.commit()
-
     def set_label_many(self, filepaths: list[str], label: int) -> int:
         """Bulk pick/reject across a selection, one transaction. Returns rows changed."""
         if not filepaths:
@@ -528,12 +522,6 @@ class ThumbsDB:
             "WHERE i.filepath=?", (filepath,)).fetchone()
         return dict(row) if row else None
 
-    def get_meta(self, filepath: str) -> dict | None:
-        """Return metadata only — no thumbnail BLOB."""
-        row = self._c.execute(
-            "SELECT * FROM images WHERE filepath=?", (filepath,)).fetchone()
-        return dict(row) if row else None
-
     def get_thumbnail(self, filepath: str) -> bytes | None:
         """Return only the thumbnail BLOB for a file."""
         row = self._c.execute(
@@ -541,19 +529,6 @@ class ThumbsDB:
             "JOIN thumbnails t ON t.image_id=i.id "
             "WHERE i.filepath=?", (filepath,)).fetchone()
         return bytes(row[0]) if row else None
-
-    def get_modified(self, filepath: str) -> float | None:
-        row = self._c.execute(
-            "SELECT modified_at FROM images WHERE filepath=?",
-            (filepath,)).fetchone()
-        return row[0] if row else None
-
-    def get_cache_key(self, filepath: str) -> tuple[float | None, str | None]:
-        """Return (modified_at, file_hash) for fast invalidation checking."""
-        row = self._c.execute(
-            "SELECT modified_at, file_hash FROM images WHERE filepath=?",
-            (filepath,)).fetchone()
-        return (row[0], row[1]) if row else (None, None)
 
     def images_in_folder(self, folder: str,
                          sort: str = "name",  sort_dir: str = "asc",
@@ -632,51 +607,6 @@ class ThumbsDB:
             (root, prefix + "%")).fetchall()
         return {r[0]: (r[1], r[2] or "", bool(r[3])) for r in rows}
 
-    def images_in_folder_recursive(self, root: str,
-                                    sort: str = "name", sort2: str = "",
-                                    with_thumbnails: bool = True) -> list[dict]:
-        import re as _re
-
-        _ORDERS = {
-            "name":         "i.filename COLLATE NOCASE",
-            "numeric name": "i.filename COLLATE NOCASE",
-            "date":         "i.added_at DESC",
-            "size":         "i.filesize DESC",
-            "modified":     "i.modified_at DESC",
-            "rating":       "i.rating DESC",
-        }
-        order = _ORDERS.get(sort, "i.filename COLLATE NOCASE")
-        if sort2 and sort2 != sort:
-            order += ", " + _ORDERS.get(sort2, "i.filename COLLATE NOCASE")
-
-        prefix = root.rstrip("/\\") + "\\"
-
-        if with_thumbnails:
-            sql = (f"SELECT i.*, t.data AS thumbnail "
-                   f"FROM images i LEFT JOIN thumbnails t ON t.image_id=i.id "
-                   f"WHERE i.folder=? OR i.folder LIKE ? ORDER BY {order}")
-        else:
-            sql = (f"SELECT i.* FROM images i "
-                   f"WHERE i.folder=? OR i.folder LIKE ? ORDER BY {order}")
-
-        rows = [dict(r) for r in self._c.execute(
-            sql, (root, prefix + "%")).fetchall()]
-
-        def _nat_key(r):
-            parts = _re.split(r'(\d+)', r["filename"].lower())
-            return [int(p) if p.isdigit() else p for p in parts]
-
-        if sort == "numeric name":
-            rows.sort(key=_nat_key)
-        elif sort2 == "numeric name":
-            rows.sort(key=_nat_key)
-
-        return rows
-
-    def total_in_folder(self, folder: str) -> int:
-        return self._c.execute(
-            "SELECT COUNT(*) FROM images WHERE folder=?", (folder,)).fetchone()[0]
-
     # ── Faceted filter (digiKam-style: combine rating/label/model/sampler/tag/text) ──────────────
     def filter_images(self, folder: str = "", recursive: bool = False,
                       rating_min: int = 0, rating_op: str = ">=", label=None,
@@ -728,21 +658,6 @@ class ThumbsDB:
             return [dict(r) for r in self._c.execute(sql, params).fetchall()]
         except Exception:
             return []
-
-    def distinct_values(self, column: str, folder: str = "") -> list[str]:
-        """Distinct values of a facet column (for populating filter dropdowns). Whitelisted columns only."""
-        if column not in ("model", "sampler", "source"):
-            return []
-        if folder:
-            rows = self._c.execute(
-                f"SELECT DISTINCT {column} FROM images WHERE folder=? "
-                f"AND {column} IS NOT NULL AND {column}!='' ORDER BY {column} COLLATE NOCASE",
-                (folder,)).fetchall()
-        else:
-            rows = self._c.execute(
-                f"SELECT DISTINCT {column} FROM images "
-                f"WHERE {column} IS NOT NULL AND {column}!='' ORDER BY {column} COLLATE NOCASE").fetchall()
-        return [r[0] for r in rows]
 
     def all_folders(self) -> list[str]:
         rows = self._c.execute(

@@ -5,7 +5,6 @@ Designed by: Zero  |  Built by: Jarvis
 from __future__ import annotations
 import json
 import threading
-from pathlib import Path
 
 from database import DATA_DIR
 

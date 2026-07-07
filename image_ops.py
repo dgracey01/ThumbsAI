@@ -202,6 +202,7 @@ class _ParamDialog(QDialog):
                  parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
+        self.finished.connect(self.deleteLater)   # free after exec(); parented dialogs otherwise pile up
         self.setModal(True)
         self.setStyleSheet(_dlg_ss())
         self._preview_img = preview
@@ -599,6 +600,7 @@ class _BatchSaveAsDialog(QDialog):
     def __init__(self, paths: list[str], parent=None):
         super().__init__(parent)
         self.setWindowTitle("Batch Save As")
+        self.finished.connect(self.deleteLater)   # free after exec(); parented dialogs otherwise pile up
         self.setModal(True)
         self.setFixedWidth(480)
         self.setStyleSheet(_dlg_ss())
@@ -829,6 +831,7 @@ class _BatchPipelineDialog(QDialog):
     def __init__(self, paths: list[str], parent=None):
         super().__init__(parent)
         self.setWindowTitle("Batch Pipeline")
+        self.finished.connect(self.deleteLater)   # free after exec(); parented dialogs otherwise pile up
         self.setModal(True)
         self.setMinimumWidth(580)
         self.setStyleSheet(_dlg_ss())

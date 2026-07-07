@@ -5,7 +5,6 @@ Designed by: Zero  |  Built by: Jarvis
 Entry point.
 """
 import sys
-import os
 import traceback
 from pathlib import Path
 

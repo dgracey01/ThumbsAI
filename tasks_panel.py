@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QPoint
 from PySide6.QtGui  import QColor
 
-from theme import BG, PAN, CAR, ACC, MUT, PRI, SEC, RED, FONT, FONT_SM, FONT_MD
+from theme import PAN, CAR, ACC, MUT, PRI, SEC, RED, FONT, FONT_SM
 
 
 class TasksPanel(QWidget):

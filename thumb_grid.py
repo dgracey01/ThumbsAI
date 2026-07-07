@@ -17,19 +17,46 @@ from io    import BytesIO
 from pathlib import Path
 
 from PySide6.QtWidgets import (
-    QWidget, QFrame, QLabel, QPushButton, QScrollArea,
-    QVBoxLayout, QHBoxLayout, QGridLayout, QMainWindow,
-    QTextEdit, QLineEdit, QSizePolicy, QSplitter, QGraphicsView,
-    QGraphicsScene, QGraphicsPixmapItem, QMenu, QMessageBox,
-    QProgressBar, QApplication, QDialog, QFileDialog, QInputDialog,
-    QRubberBand, QSpinBox, QCheckBox, QSlider,
+    QWidget,
+    QFrame,
+    QLabel,
+    QPushButton,
+    QScrollArea,
+    QVBoxLayout,
+    QHBoxLayout,
+    QMainWindow,
+    QTextEdit,
+    QLineEdit,
+    QSplitter,
+    QGraphicsView,
+    QGraphicsScene,
+    QGraphicsPixmapItem,
+    QMenu,
+    QMessageBox,
+    QProgressBar,
+    QApplication,
+    QDialog,
+    QFileDialog,
+    QInputDialog,
+    QRubberBand,
+    QSpinBox,
+    QCheckBox,
+    QSlider,
 )
 from PySide6.QtCore  import Qt, Signal, QObject, QThread, QTimer, QRectF, QPoint, QUrl, QRect, QSize, QBuffer, QIODevice, QThreadPool, QRunnable, QMimeData
 from PySide6.QtGui   import QPixmap, QImage, QColor, QPainter, QFont, QWheelEvent, QKeyEvent, QContextMenuEvent, QIcon, QDrag, QTransform, QPolygon
 
 from theme import (
-    BG, PAN, CAR, ACC, GRN, RED, MUT, AMB,
-    PRI, SEC, FONT, FONT_SM, FONT_MD, FONT_LG,
+    BG,
+    PAN,
+    CAR,
+    ACC,
+    MUT,
+    PRI,
+    SEC,
+    FONT,
+    FONT_SM,
+    FONT_MD,
 )
 from database    import ThumbsDB
 from ai_metadata import parse_png_metadata
@@ -211,7 +238,7 @@ def _extract_video_thumb(path: str, size: int) -> tuple[bytes | None, int, int]:
         from PIL import Image as _PIL
         from io import BytesIO as _BytesIO
         img = _PIL.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        img.thumbnail((size, size), _PIL.LANCZOS)
+        img.thumbnail((size, size), _PIL.LANCZOS, reducing_gap=2.0)
         buf = _BytesIO()
         img.save(buf, "JPEG", quality=82)
         return buf.getvalue(), w, h
@@ -245,7 +272,7 @@ def _extract_video_thumb_av(path: str, size: int) -> tuple[bytes | None, int, in
             img = frame.to_image()
             w   = w or img.width
             h   = h or img.height
-            img.thumbnail((size, size), _PIL.LANCZOS)
+            img.thumbnail((size, size), _PIL.LANCZOS, reducing_gap=2.0)
             buf = _BytesIO()
             img.save(buf, "JPEG", quality=82)
             container.close()
@@ -323,7 +350,7 @@ def _extract_video_thumb_ffmpeg(path: str, size: int) -> tuple[bytes | None, int
         img.load()
         w   = w or img.width
         h   = h or img.height
-        img.thumbnail((size, size), _PIL.LANCZOS)
+        img.thumbnail((size, size), _PIL.LANCZOS, reducing_gap=2.0)
         buf = _BytesIO()
         img.save(buf, "JPEG", quality=82)
         return buf.getvalue(), w, h
@@ -579,11 +606,16 @@ class _ThumbWorker(QThread):
                 try:
                     from PIL import Image as _PIL
                     with _PIL.open(path_str) as img:
-                        w, h = img.size
-                        thumb_img = img.copy()
-                        thumb_img.thumbnail((t, t), _PIL.LANCZOS)
+                        w, h = img.size                       # ORIGINAL dims (before draft shrinks .size)
+                        # draft(): for JPEGs, decode at 1/2–1/8 scale up front — 2-8× faster on large
+                        # photos (no-op for PNG). reducing_gap: box-reduce then LANCZOS = faster, ~same
+                        # quality. No .copy() (we don't reuse img). convert RGB so transparent PNG/P
+                        # images can be JPEG-saved instead of erroring out (they'd previously get no thumb).
+                        img.draft("RGB", (t * 2, t * 2))
+                        img.thumbnail((t, t), _PIL.LANCZOS, reducing_gap=2.0)
                         buf = BytesIO()
-                        thumb_img.save(buf, format="JPEG", quality=82)
+                        (img if img.mode == "RGB" else img.convert("RGB")).save(
+                            buf, format="JPEG", quality=82)
                         thumb_bytes = buf.getvalue()
                 except Exception:
                     return None
@@ -683,10 +715,10 @@ class _ThumbWorker(QThread):
                         data = zf.read(name)
                         with _PIL.open(BytesIO(data)) as img:
                             w, h = img.size
-                            thumb_img = img.copy()
-                            thumb_img.thumbnail((t, t), _PIL.LANCZOS)
+                            img.draft("RGB", (t * 2, t * 2))
+                            img.thumbnail((t, t), _PIL.LANCZOS, reducing_gap=2.0)
                             buf = BytesIO()
-                            thumb_img.save(buf, format="JPEG", quality=82)
+                            (img if img.mode == "RGB" else img.convert("RGB")).save(buf, format="JPEG", quality=82)
                             thumb_bytes = buf.getvalue()
                         meta = parse_png_metadata(None, raw_bytes=data)
                     except Exception:
@@ -852,6 +884,7 @@ class _ImageView(QGraphicsView):
 class _ResizeDialog(QDialog):
     def __init__(self, width: int, height: int, parent=None):
         super().__init__(parent)
+        self.finished.connect(self.deleteLater)   # free after exec(); parented dialogs otherwise pile up
         self.setWindowTitle("Resize Image")
         self.setFixedSize(280, 160)
         self.setStyleSheet(
@@ -1484,6 +1517,7 @@ class ImageViewer(QMainWindow):
             mb.setText("Saved to database.")
             mb.setInformativeText(warning)
             mb.exec()
+            mb.deleteLater()      # parented to self — free it so message boxes don't accumulate
 
     def _current_screen(self):
         s = self.screen()
@@ -1637,8 +1671,9 @@ class ImageViewer(QMainWindow):
             from PIL import Image as _PIL
             from io import BytesIO as _BytesIO
             with _PIL.open(img_fp) as img:
+                img.draft("RGB", (DEFAULT_THUMB * 2, DEFAULT_THUMB * 2))
                 img = img.convert("RGB")
-                img.thumbnail((DEFAULT_THUMB, DEFAULT_THUMB), _PIL.LANCZOS)
+                img.thumbnail((DEFAULT_THUMB, DEFAULT_THUMB), _PIL.LANCZOS, reducing_gap=2.0)
                 buf = _BytesIO()
                 img.save(buf, "JPEG", quality=85)
                 thumb_bytes = buf.getvalue()
@@ -1956,6 +1991,7 @@ def _send_to_recycle(path: str) -> bool:
 class _PropertiesDialog(QDialog):
     def __init__(self, row: dict, db=None, parent=None):
         super().__init__(parent)
+        self.finished.connect(self.deleteLater)   # free after exec(); parented dialogs otherwise pile up
         self._db     = db
         self._fields: dict[str, "QWidget"] = {}
         self.saved   = False
@@ -2129,6 +2165,7 @@ class _PropertiesDialog(QDialog):
                 mb.setText("Saved to database.")
                 mb.setInformativeText(warning)
                 mb.exec()
+                mb.deleteLater()      # parented to self — free it so message boxes don't accumulate
 
         _btn_base = (
             f"border:none;border-radius:4px;font-family:{FONT};"
@@ -2550,9 +2587,13 @@ class ThumbCard(QFrame):
         self._set_border(val)
 
     def mousePressEvent(self, e):
+        # Only LEFT-click changes the selection. A right-click must NOT collapse a multi-selection —
+        # otherwise opening the context menu on several selected cards deselects all but this one, and
+        # copy/move/delete then act on a single image. Right-click selection (only when this card isn't
+        # already part of the selection) is handled in contextMenuEvent.
         if e.button() == Qt.LeftButton:
             self._drag_start = e.pos()
-        self._on_select(self, e.modifiers())
+            self._on_select(self, e.modifiers())
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e):
@@ -2736,7 +2777,7 @@ class ThumbCard(QFrame):
             f"QMenu::separator{{height:1px;background:{MUT};margin:3px 8px;}}")
         menu = QMenu(self)
         menu.setStyleSheet(_menu_ss)
-        menu.addAction("Metadata",           self._show_properties)
+        menu.addAction("Copy Path",          self._copy_path)
         menu.addSeparator()
         # ── Pick / reject / rate (applies to the whole selection) ─────────────
         if self._on_mark is not None:
@@ -2813,10 +2854,6 @@ class ThumbCard(QFrame):
 
     # ── Context-menu actions ──────────────────────────────────────────────────
 
-    def _show_properties(self):
-        dlg = _PropertiesDialog(self._row, db=self._db, parent=self)
-        dlg.exec()
-
     def _open_explorer(self):
         fp = self._row.get("filepath", "")
         if fp and os.path.isfile(fp):
@@ -2835,8 +2872,9 @@ class ThumbCard(QFrame):
             from io import BytesIO as _BytesIO
             size = self._img.width()
             with _PIL.open(img_fp) as img:
+                img.draft("RGB", (size * 2, size * 2))
                 img = img.convert("RGB")
-                img.thumbnail((size, size), _PIL.LANCZOS)
+                img.thumbnail((size, size), _PIL.LANCZOS, reducing_gap=2.0)
                 buf = _BytesIO()
                 img.save(buf, "JPEG", quality=85)
                 thumb_bytes = buf.getvalue()
@@ -2878,37 +2916,55 @@ class ThumbCard(QFrame):
         m.addAction("Browse…", lambda: action_fn(None))
         return m
 
+    def _selected_cards(self):
+        """The cards a menu action should act on: the whole selection (falling back to just this card),
+        with this card guaranteed included — same rule _delete_file uses, so copy/move/delete all agree."""
+        sel = (self._on_get_selection() if self._on_get_selection else []) or [self]
+        if self not in sel:
+            sel = [self]
+        return [c for c in sel if c._row.get("filepath") and os.path.isfile(c._row.get("filepath"))]
+
     def _copy_file(self, dest_dir=None):
-        fp = self._row.get("filepath", "")
-        if not fp or not os.path.isfile(fp):
+        cards = self._selected_cards()
+        if not cards:
             return
         if dest_dir is None:
             dest_dir = QFileDialog.getExistingDirectory(
-                self, "Copy to folder…", str(Path(fp).parent))
+                self, "Copy to folder…", str(Path(cards[0]._row["filepath"]).parent))
         if not dest_dir:
             return
-        dest = Path(dest_dir) / Path(fp).name
-        try:
-            shutil.copy2(fp, dest)
-            self._add_recent_dir("recent_copy_dirs", dest_dir)
-        except Exception as exc:
-            QMessageBox.critical(self, "Copy failed", str(exc))
+        failed = []
+        for card in cards:
+            fp = card._row.get("filepath", "")
+            try:
+                shutil.copy2(fp, Path(dest_dir) / Path(fp).name)
+            except Exception as exc:
+                failed.append(f"{Path(fp).name}: {exc}")
+        self._add_recent_dir("recent_copy_dirs", dest_dir)
+        if failed:
+            QMessageBox.critical(self, "Copy failed", "\n".join(failed[:12]))
 
     def _move_file(self, dest_dir=None):
-        fp = self._row.get("filepath", "")
-        if not fp or not os.path.isfile(fp):
+        cards = self._selected_cards()
+        if not cards:
             return
         if dest_dir is None:
             dest_dir = QFileDialog.getExistingDirectory(
-                self, "Move to folder…", str(Path(fp).parent))
+                self, "Move to folder…", str(Path(cards[0]._row["filepath"]).parent))
         if not dest_dir:
             return
-        dest = str(Path(dest_dir) / Path(fp).name)
-        try:
-            shutil.move(fp, dest)
-            self._add_recent_dir("recent_move_dirs", dest_dir)
-        except Exception as exc:
-            QMessageBox.critical(self, "Move failed", str(exc))
+        failed = []
+        for card in list(cards):
+            fp = card._row.get("filepath", "")
+            try:
+                shutil.move(fp, str(Path(dest_dir) / Path(fp).name))
+                if self._on_remove:
+                    self._on_remove(card, fp)   # file left this folder → drop the card from the view
+            except Exception as exc:
+                failed.append(f"{Path(fp).name}: {exc}")
+        self._add_recent_dir("recent_move_dirs", dest_dir)
+        if failed:
+            QMessageBox.critical(self, "Move failed", "\n".join(failed[:12]))
             return
         if self._on_remove:
             self._on_remove(self, fp)
@@ -2976,9 +3032,11 @@ class ThumbCard(QFrame):
                 "Could not recycle:\n" + "\n".join(failed))
 
     def _copy_path(self):
+        """Copy this image's full file path to the clipboard (native separators). Wired to the
+        right-click 'Copy Path' item that replaced the non-working grid 'Metadata' entry."""
         fp = self._row.get("filepath", "")
         if fp:
-            QApplication.clipboard().setText(fp)
+            QApplication.clipboard().setText(os.path.normpath(fp))
 
 
 # ── Background thumbnail decoder ─────────────────────────────────────────────
@@ -3213,6 +3271,7 @@ class ThumbGrid(QWidget):
             _mb.setText("Filter failed.")
             _mb.setDetailedText(str(exc))
             _mb.exec()
+            _mb.deleteLater()      # parented to self — free it so message boxes don't accumulate
             return
         if result is None:
             return  # user cancelled inside the plugin's own dialog
@@ -3226,6 +3285,7 @@ class ThumbGrid(QWidget):
         msg.addButton("Discard",    QMessageBox.RejectRole)
         msg.exec()
         clicked = msg.clickedButton()
+        msg.deleteLater()          # parented to self — free it so message boxes don't accumulate
 
         dest = None
         if clicked is btn_over:
@@ -3249,7 +3309,7 @@ class ThumbGrid(QWidget):
                 sz  = self._thumb_size
                 buf = _BytesIO()
                 thumb = result.copy()
-                thumb.thumbnail((sz, sz), _PIL2.LANCZOS)
+                thumb.thumbnail((sz, sz), _PIL2.LANCZOS, reducing_gap=2.0)
                 thumb.convert("RGB").save(buf, "JPEG", quality=85)
                 self._on_custom_thumb_fp(filepath, buf.getvalue())
             except Exception:
@@ -3649,10 +3709,10 @@ class ThumbGrid(QWidget):
                     from PIL import Image as _PIL
                     with _PIL.open(fp) as img:
                         w, h = img.size
-                        tmp  = img.copy()
-                        tmp.thumbnail((t, t), _PIL.LANCZOS)
+                        img.draft("RGB", (t * 2, t * 2))
+                        img.thumbnail((t, t), _PIL.LANCZOS, reducing_gap=2.0)
                         buf  = BytesIO()
-                        tmp.save(buf, format="JPEG", quality=82)
+                        (img if img.mode == "RGB" else img.convert("RGB")).save(buf, format="JPEG", quality=82)
                         thumb_bytes = buf.getvalue()
                 mtime = Path(fp).stat().st_mtime
                 meta  = parse_png_metadata(fp)
@@ -3741,10 +3801,10 @@ class ThumbGrid(QWidget):
             else:
                 with _PIL.open(fp) as img:
                     w, h = img.size
-                    tmp = img.copy()
-                    tmp.thumbnail((t, t), _PIL.LANCZOS)
+                    img.draft("RGB", (t * 2, t * 2))
+                    img.thumbnail((t, t), _PIL.LANCZOS, reducing_gap=2.0)
                     buf = BytesIO()
-                    tmp.save(buf, format="JPEG", quality=82)
+                    (img if img.mode == "RGB" else img.convert("RGB")).save(buf, format="JPEG", quality=82)
                     thumb_bytes = buf.getvalue()
             from database import _file_hash
             mtime = Path(fp).stat().st_mtime

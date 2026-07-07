@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtWidgets import (QWidget, QFrame, QVBoxLayout, QHBoxLayout,
                                QTreeView, QLabel, QPushButton, QFileSystemModel,
                                QMenu, QCheckBox, QFileIconProvider)
-from PySide6.QtCore    import Qt, Signal, QDir, QModelIndex, QFileInfo, QObject
+from PySide6.QtCore import Qt, Signal, QDir, QModelIndex, QFileInfo
 from PySide6.QtGui     import QColor, QStandardItemModel, QStandardItem
 
 from theme import BG, PAN, MUT, ACC, AMB, PRI, SEC, FONT, FONT_SM
