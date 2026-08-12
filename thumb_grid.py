@@ -44,7 +44,7 @@ from PySide6.QtWidgets import (
     QSlider,
 )
 from PySide6.QtCore  import Qt, Signal, QObject, QThread, QTimer, QRectF, QPoint, QUrl, QRect, QSize, QBuffer, QIODevice, QThreadPool, QRunnable, QMimeData
-from PySide6.QtGui   import QPixmap, QImage, QColor, QPainter, QFont, QWheelEvent, QKeyEvent, QContextMenuEvent, QIcon, QDrag, QTransform, QPolygon
+from PySide6.QtGui   import QPixmap, QImage, QColor, QPainter, QFont, QWheelEvent, QKeyEvent, QContextMenuEvent, QIcon, QDrag, QTransform, QPolygon, QMovie, QImageReader
 
 from theme import (
     BG,
@@ -553,10 +553,17 @@ class _ThumbWorker(QThread):
         if disk_paths and not self.isInterruptionRequested():
             orphans = []
             for db_path in cached:
+                # DATA-LOSS GUARD: a disabled-extension file (e.g. .png when png is hidden) is NOT
+                # enumerated into disk_paths, so its absence there is meaningless — pruning it would delete
+                # a perfectly good, still-on-disk image from the index. Only prune entries whose extension
+                # we actually scanned for. (This is exactly how a whole folder of .png renders got wiped.)
+                real = db_path.split("::", 1)[0]
+                if os.path.splitext(real)[1].lower() not in self._enabled_exts:
+                    continue
                 if "::" in db_path:
                     # ZIP member (zip_path::member) — orphaned only if the
                     # archive itself is gone; keep it while the .zip exists.
-                    if db_path.split("::", 1)[0] not in disk_paths:
+                    if real not in disk_paths:
                         orphans.append(db_path)
                 elif db_path not in disk_paths:
                     orphans.append(db_path)
@@ -976,6 +983,7 @@ class ImageViewer(QMainWindow):
                                 if settings else FONT_SM)
         self._modified_px:  QPixmap | None = None   # committed in-memory state
         self._edit_base_px: QPixmap | None = None   # base for current edit session
+        self._movie: QMovie | None = None           # drives animated GIF/WEBP playback in the view
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
         self._preview_timer.setInterval(150)
@@ -1400,7 +1408,9 @@ class ImageViewer(QMainWindow):
         # Load full image (Qt native first, PIL fallback for PSD/HDR/etc.)
         self._modified_px  = None
         self._edit_base_px = None
+        self._stop_movie()                       # tear down any previous animation first
         self._view.set_pixmap(self._load_pixmap(fp))
+        self._maybe_start_animation(fp)          # play animated GIF/WEBP (else stays static)
 
         # Resize window to match new image when in fit mode (deferred so
         # fit_in_view runs first and the transform is up to date)
@@ -1447,6 +1457,42 @@ class ImageViewer(QMainWindow):
         self._kv_labels["Seed"].setText(row.get("seed", "") or "")
         self._kv_labels["Steps"].setText(row.get("steps", "") or "")
         self._kv_labels["CFG Scale"].setText(row.get("cfg_scale", "") or "")
+
+    # ── Animated GIF / WEBP playback ─────────────────────────────────────────
+
+    def _stop_movie(self):
+        """Freeze/stop any running animation and release its file handle. Called on image switch,
+        close, and before editing/saving (so edits operate on the currently-visible frame)."""
+        if self._movie is not None:
+            try:
+                self._movie.stop()
+                self._movie.deleteLater()
+            except Exception:
+                pass
+            self._movie = None
+
+    def _maybe_start_animation(self, fp: str):
+        """If fp is a multi-frame GIF/WEBP, drive the view with a QMovie. Each new frame is pushed via
+        _ImageView.update_pixmap (which preserves zoom/scroll), so panning a playing image stays put.
+        Single-frame images and formats Qt can't animate fall through to the static pixmap already set."""
+        if not (fp and os.path.isfile(fp)):
+            return
+        if Path(fp).suffix.lower() not in (".gif", ".webp"):
+            return
+        try:
+            r = QImageReader(fp)
+            if not (r.supportsAnimation() and r.imageCount() > 1):
+                return   # static GIF/WEBP — leave the frame set_pixmap already showed
+            mv = QMovie(fp)
+            if not mv.isValid():
+                return
+            mv.setCacheMode(QMovie.CacheMode.CacheAll)
+            # Feed frames into the graphics view without resetting the user's zoom/pan.
+            mv.frameChanged.connect(lambda _n, m=mv: self._view.update_pixmap(m.currentPixmap()))
+            self._movie = mv
+            mv.start()
+        except Exception:
+            self._stop_movie()
 
     # ── Metadata panel edit/save ─────────────────────────────────────────────
 
@@ -1593,6 +1639,7 @@ class ImageViewer(QMainWindow):
             QTimer.singleShot(0, self._view.fit_in_view)
 
     def closeEvent(self, event):
+        self._stop_movie()
         s = self._settings
         if s and s.get("viewer_size_mode", "fit") == "remember":
             s.set("viewer_width",  self.width())
@@ -1607,6 +1654,7 @@ class ImageViewer(QMainWindow):
     def _toggle_edit(self, checked: bool):
         self._edit_panel.setVisible(checked)
         if checked:
+            self._stop_movie()                       # freeze the animation so edits use the shown frame
             self._edit_base_px = self._working_pixmap()
         self._resize_by(_EDIT_W if checked else -_EDIT_W)
         self._sync_splitter()
@@ -2313,7 +2361,7 @@ class ThumbCard(QFrame):
                  on_select, on_open,
                  on_remove=None, on_rename=None,
                  settings=None,
-                 on_get_selection=None,
+                 on_get_selected_fps=None,
                  font_size: int = FONT_SM,
                  defer_thumb: bool = False,
                  on_set_thumb=None,
@@ -2332,8 +2380,9 @@ class ThumbCard(QFrame):
         self._on_run_plugin    = on_run_plugin     # callable(PluginInfo, filepath)
         self._on_mark          = on_mark           # callable(label=, rating=) → grid applies to selection
         self._settings         = settings
-        self._on_get_selection = on_get_selection # callable() → list[ThumbCard]
+        self._on_get_selected_fps = on_get_selected_fps  # callable() → list[str] (ALL selected, on/off-screen)
         self._selected         = False
+        self._press_pending_single = False        # deferred "collapse to just this card" on a plain click
         self._drag_start: QPoint | None = None
         self._font_size        = font_size
 
@@ -2587,13 +2636,18 @@ class ThumbCard(QFrame):
         self._set_border(val)
 
     def mousePressEvent(self, e):
-        # Only LEFT-click changes the selection. A right-click must NOT collapse a multi-selection —
-        # otherwise opening the context menu on several selected cards deselects all but this one, and
-        # copy/move/delete then act on a single image. Right-click selection (only when this card isn't
-        # already part of the selection) is handled in contextMenuEvent.
+        # Selection changes on LEFT-click only (right-click preserves a multi-selection for the menu).
+        # AND: pressing an already-selected card with NO modifier must NOT collapse the selection now —
+        # otherwise dragging several selected images out only carries this one. Defer the collapse to
+        # release: a plain click selects just this card; a drag keeps the whole selection.
+        self._press_pending_single = False
         if e.button() == Qt.LeftButton:
             self._drag_start = e.pos()
-            self._on_select(self, e.modifiers())
+            mods = e.modifiers()
+            if (mods & (Qt.ControlModifier | Qt.ShiftModifier)) or not self._selected:
+                self._on_select(self, mods)          # ctrl/shift, or clicking an unselected card → select now
+            else:
+                self._press_pending_single = True    # clicked an already-selected card, no modifier
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e):
@@ -2602,20 +2656,20 @@ class ThumbCard(QFrame):
                 and (e.pos() - self._drag_start).manhattanLength()
                     >= QApplication.startDragDistance()):
             self._drag_start = None
+            self._press_pending_single = False       # a drag happened → keep the multi-selection
             self._start_external_drag()
             return
         super().mouseMoveEvent(e)
 
     def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton and self._press_pending_single:
+            self._press_pending_single = False
+            self._on_select(self, Qt.NoModifier)     # it was a click, not a drag → collapse to just this
         self._drag_start = None
         super().mouseReleaseEvent(e)
 
     def _start_external_drag(self):
-        selection = (self._on_get_selection() if self._on_get_selection else []) or [self]
-        if self not in selection:
-            selection = [self]
-        fps = [c._row.get("filepath", "") for c in selection
-               if c._row.get("filepath") and os.path.isfile(c._row["filepath"])]
+        fps = self._target_fps()
         if not fps:
             return
 
@@ -2916,26 +2970,29 @@ class ThumbCard(QFrame):
         m.addAction("Browse…", lambda: action_fn(None))
         return m
 
-    def _selected_cards(self):
-        """The cards a menu action should act on: the whole selection (falling back to just this card),
-        with this card guaranteed included — same rule _delete_file uses, so copy/move/delete all agree."""
-        sel = (self._on_get_selection() if self._on_get_selection else []) or [self]
-        if self not in sel:
-            sel = [self]
-        return [c for c in sel if c._row.get("filepath") and os.path.isfile(c._row.get("filepath"))]
+    def _target_fps(self):
+        """The FILE PATHS a menu/drag action acts on: the whole selection — INCLUDING images scrolled
+        off-screen (read from the selection set, not the visible card pool) — with this card's file
+        guaranteed included. Returning immutable paths (not live pool cards) is what makes multi
+        delete/move/drag correct: the card pool recycles/reassigns cards as rows are removed, so any
+        loop over card objects reads the wrong images after the first change."""
+        fps = list(self._on_get_selected_fps() or []) if self._on_get_selected_fps else []
+        my_fp = self._row.get("filepath", "")
+        if my_fp and my_fp not in fps:
+            fps = [my_fp]                      # right-clicked a card outside the selection → act on it alone
+        return [f for f in fps if f and os.path.isfile(f)]
 
     def _copy_file(self, dest_dir=None):
-        cards = self._selected_cards()
-        if not cards:
+        fps = self._target_fps()
+        if not fps:
             return
         if dest_dir is None:
             dest_dir = QFileDialog.getExistingDirectory(
-                self, "Copy to folder…", str(Path(cards[0]._row["filepath"]).parent))
+                self, "Copy to folder…", str(Path(fps[0]).parent))
         if not dest_dir:
             return
         failed = []
-        for card in cards:
-            fp = card._row.get("filepath", "")
+        for fp in fps:
             try:
                 shutil.copy2(fp, Path(dest_dir) / Path(fp).name)
             except Exception as exc:
@@ -2945,21 +3002,20 @@ class ThumbCard(QFrame):
             QMessageBox.critical(self, "Copy failed", "\n".join(failed[:12]))
 
     def _move_file(self, dest_dir=None):
-        cards = self._selected_cards()
-        if not cards:
+        fps = self._target_fps()
+        if not fps:
             return
         if dest_dir is None:
             dest_dir = QFileDialog.getExistingDirectory(
-                self, "Move to folder…", str(Path(cards[0]._row["filepath"]).parent))
+                self, "Move to folder…", str(Path(fps[0]).parent))
         if not dest_dir:
             return
         failed = []
-        for card in list(cards):
-            fp = card._row.get("filepath", "")
+        for fp in fps:
             try:
                 shutil.move(fp, str(Path(dest_dir) / Path(fp).name))
                 if self._on_remove:
-                    self._on_remove(card, fp)   # file left this folder → drop the card from the view
+                    self._on_remove(None, fp)   # file left this folder → drop its row (removed by path)
             except Exception as exc:
                 failed.append(f"{Path(fp).name}: {exc}")
         self._add_recent_dir("recent_move_dirs", dest_dir)
@@ -2997,18 +3053,17 @@ class ThumbCard(QFrame):
             self._on_rename(self, fp, new_fp)
 
     def _delete_file(self):
-        # Collect all cards to delete (multi-select or just self)
-        selection = (self._on_get_selection() if self._on_get_selection else []) or [self]
-        # Ensure this card is included
-        if self not in selection:
-            selection = [self]
+        # All selected files (incl. off-screen) as an immutable path snapshot — see _target_fps.
+        fps = self._target_fps()
+        if not fps:
+            return
 
         confirm = (self._settings.get("confirm_delete") if self._settings else True)
         if confirm:
-            if len(selection) == 1:
-                msg = f'Move "{Path(selection[0]._row.get("filepath","")).name}" to the Recycle Bin?'
+            if len(fps) == 1:
+                msg = f'Move "{Path(fps[0]).name}" to the Recycle Bin?'
             else:
-                msg = f'Move {len(selection)} selected files to the Recycle Bin?'
+                msg = f'Move {len(fps)} selected files to the Recycle Bin?'
             reply = QMessageBox.question(
                 self, "Delete", msg,
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
@@ -3016,13 +3071,10 @@ class ThumbCard(QFrame):
                 return
 
         failed = []
-        for card in list(selection):   # copy — list mutates during removal
-            fp = card._row.get("filepath", "")
-            if not fp:
-                continue
-            if _send_to_recycle(fp):
+        for fp in fps:                 # iterate PATHS — the card pool reassigns as rows drop, so
+            if _send_to_recycle(fp):   # looping over card objects would target the wrong images
                 if self._on_remove:
-                    self._on_remove(card, fp)
+                    self._on_remove(None, fp)   # _on_card_removed removes by path (card arg unused)
             else:
                 failed.append(Path(fp).name)
 
@@ -3322,7 +3374,12 @@ class ThumbGrid(QWidget):
         self._folder = folder
         self._folder_gen += 1
         self._clear_grid()        # also resets self._rows = [] → grid shows empty
-        if not folder or not os.path.isdir(folder):
+        # Load cached DB rows even when the live folder is UNREACHABLE (offline NAS / network share, e.g.
+        # \\Goliath\... when that host is down). This is a thumbnail CACHE — browsing cached thumbnails must
+        # keep working while the source is offline; otherwise a whole folder of generated images "vanishes"
+        # the moment its drive drops. The disk SCAN, which genuinely needs the folder reachable, is separate
+        # (scan_folder still bails on os.path.isdir), so no scan is attempted against a dead path.
+        if not folder:
             return
         sort_args = (self._sort,  self._sort_dir,
                      self._sort2, self._sort2_dir,
@@ -3945,7 +4002,7 @@ class ThumbGrid(QWidget):
                 on_remove=self._on_card_removed,
                 on_rename=self._on_card_renamed,
                 settings=self._settings,
-                on_get_selection=self._get_selected_cards,
+                on_get_selected_fps=self._get_selected_fps,
                 font_size=self._font_image,
                 defer_thumb=False,
                 on_set_thumb=self._on_custom_thumb,
@@ -4032,9 +4089,11 @@ class ThumbGrid(QWidget):
             evict = self._cache_lru.popleft()
             self._px_cache.pop(evict, None)
 
-    def _get_selected_cards(self) -> list["ThumbCard"]:
-        return [c for c in self._card_pool
-                if c.isVisible() and c._row.get("filepath") in self._selected_fps]
+    def _get_selected_fps(self) -> list[str]:
+        """All selected file paths — the selection's source of truth is _selected_fps, which survives
+        scrolling / card-pool recycling (the visible-card list does not). Ordered by grid row."""
+        sel = self._selected_fps
+        return [r["filepath"] for r in self._rows if r.get("filepath") in sel] if sel else []
 
     def _on_viewport_resize(self):
         self._rebuild_pool()

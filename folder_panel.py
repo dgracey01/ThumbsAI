@@ -257,7 +257,9 @@ class FolderPanel(QWidget):
     def __init__(self, db=None, settings=None, parent=None):
         super().__init__(parent)
         self.setMinimumWidth(160)
-        self.setMaximumWidth(340)
+        # No maximum width: the folder panel shares the left column's width with the AI console (they're
+        # stacked in a vertical splitter), so a cap here would ceiling the WHOLE column — the JoyCaption
+        # box couldn't be widened. Let the horizontal splitter size the column freely instead.
 
         self._settings      = settings
         self._current_path  = ""

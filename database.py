@@ -71,6 +71,8 @@ class ThumbsDB:
         # journal_mode=WAL persists on the DB file; the rest are per-connection
         # and must be set on every new connection.
         c.execute("PRAGMA journal_mode=WAL")
+        c.execute("PRAGMA foreign_keys=ON")         # enforce ON DELETE CASCADE: deleting an image now also
+                                                    # drops its thumbnail BLOB (else orphaned BLOBs pile up)
         c.execute("PRAGMA synchronous=NORMAL")
         c.execute("PRAGMA cache_size=-64000")       # 64 MB page cache
         c.execute("PRAGMA mmap_size=536870912")     # 512 MB memory-map
@@ -93,6 +95,13 @@ class ThumbsDB:
     def _init(self):
         # Touch self._c to create the main-thread connection (with pragmas),
         # then create the schema and run migrations once.
+        # NEW databases: choose INCREMENTAL auto-vacuum BEFORE any table exists — the only point SQLite lets
+        # auto_vacuum be set without a full VACUUM. This is what lets reclaim() return freed pages to the OS
+        # cheaply after orphan removal, so the file shrinks instead of only ever growing. (Legacy DBs created
+        # before this get converted on their first reclaim().)
+        if self._c.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='images'").fetchone() is None:
+            self._c.execute("PRAGMA auto_vacuum=INCREMENTAL")
         self._c.executescript("""
             -- ── Metadata table (no BLOBs) ────────────────────────────────────
             CREATE TABLE IF NOT EXISTS images (
@@ -285,18 +294,30 @@ class ThumbsDB:
         self._c.execute("PRAGMA optimize")
         self._c.execute("PRAGMA wal_checkpoint(PASSIVE)")
 
-    def search(self, query: str, folder: str = "") -> list[dict]:
+    def search(self, query: str, folder: str = "", require_thumbnail: bool = True) -> list[dict]:
         """FTS5 full-text search across filename/prompt/negative/model/seed/sampler/tags (O(log N), indexed),
-        thumbnails joined. Terms are AND-ed. Falls back to a LIKE scan if the FTS query won't parse."""
+        thumbnails joined. Terms are AND-ed. Falls back to a LIKE scan if the FTS query won't parse.
+
+        require_thumbnail=True (default) keeps rows that are VIEWABLE (have a cached thumbnail) OR carry
+        generation metadata (source/prompt/model). This hides dead no-thumbnail-no-metadata ghosts (the empty
+        "No Image" box complaint) WITHOUT hiding AI-generated images whose thumbnail was never cached — those
+        stay findable by their prompt/model/seed. require_thumbnail=False returns everything (LEFT JOIN)."""
         q = query.strip()
         if not q:
             return []
         fts_q = " ".join(f'"{w}"' for w in q.split())     # quote/escape each term; space = implicit AND
+        # viewable OR flagged as a generated image (source = A1111/NovelAI/ComfyUI/…) — never drop a
+        # generation just because its thumbnail was never cached. `source` is the reliable generated-image
+        # flag; prompt/model can be spuriously populated on non-generated PNGs, so they're NOT used here.
+        keep = ("(t.data IS NOT NULL OR i.source != '')"
+                if require_thumbnail else "")
         sql = ("SELECT i.*, t.data AS thumbnail FROM images_fts f "
                "JOIN images i ON i.id = f.rowid "
                "LEFT JOIN thumbnails t ON t.image_id = i.id "
                "WHERE images_fts MATCH ?")
         params: list = [fts_q]
+        if keep:
+            sql += " AND " + keep
         if folder:
             sql += " AND i.folder = ?"
             params.append(folder)
@@ -310,6 +331,8 @@ class ThumbsDB:
             cond = ("(i.filename LIKE ? OR i.prompt LIKE ? OR i.model LIKE ? OR i.seed LIKE ? "
                     "OR i.sampler LIKE ? OR i.tags LIKE ?)")
             fp = [like] * 6
+            if keep:
+                cond = keep + " AND " + cond   # same viewable-or-has-metadata guard as the FTS path
             if folder:
                 cond = "i.folder=? AND " + cond
                 fp = [folder] + fp
@@ -472,6 +495,43 @@ class ThumbsDB:
         # thumbnails row is removed by ON DELETE CASCADE
         self._c.execute("DELETE FROM images WHERE filepath=?", (filepath,))
         self._c.commit()
+
+    def reclaim(self, convert_if_needed: bool = True) -> int:
+        """Return freed disk space to the OS so the DB file actually SHRINKS after deletes (SQLite otherwise
+        keeps deleted pages as internal free space forever — the file only grows). Also purges any orphaned
+        thumbnail BLOBs left behind by pre-cascade deletes. Returns bytes freed (approx). Safe to call any
+        time; a no-op-cost call when there's nothing to reclaim.
+
+        • Fast path — INCREMENTAL auto_vacuum DB: `PRAGMA incremental_vacuum` truncates freelist pages off the
+          end of the file. No full rewrite, no 2x-disk requirement.
+        • One-time path — legacy auto_vacuum=NONE DB: set INCREMENTAL + `VACUUM` (the VACUUM applies the mode
+          switch AND reclaims all current free space in one pass). Every later call is then the fast path."""
+        c = self._c
+        try:
+            before = THUMBS_DB.stat().st_size
+        except OSError:
+            before = 0
+        try:
+            # 1. drop orphaned thumbnail BLOBs (image row already gone — e.g. legacy no-cascade deletes)
+            c.execute("DELETE FROM thumbnails WHERE NOT EXISTS "
+                      "(SELECT 1 FROM images i WHERE i.id = thumbnails.image_id)")
+            c.commit()
+            # 2. hand the freed pages back to the filesystem
+            mode = c.execute("PRAGMA auto_vacuum").fetchone()[0]     # 0=NONE 1=FULL 2=INCREMENTAL
+            if mode == 2:
+                c.execute("PRAGMA incremental_vacuum")
+                c.commit()
+            elif convert_if_needed:
+                c.execute("PRAGMA auto_vacuum=INCREMENTAL")
+                c.execute("VACUUM")            # one-time: switch mode + reclaim existing free space
+                c.commit()
+            c.execute("PRAGMA wal_checkpoint(TRUNCATE)")            # flush + shrink the -wal sidecar too
+        except Exception:
+            return 0
+        try:
+            return max(0, before - THUMBS_DB.stat().st_size)
+        except OSError:
+            return 0
 
     def delete_paths(self, filepaths: list[str]) -> int:
         """Delete many rows by filepath in one transaction (thumbnails cascade).

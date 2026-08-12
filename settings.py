@@ -60,6 +60,53 @@ _DEFAULTS: dict = {
     "recent_move_dirs":        [],
     # Always-watched folders (survive restarts)
     "watched_folders":         [],
+
+    # ── AI (auto-tagging via JoyCaption) ──────────────────────────────────────────
+    # INTERNAL mode runs JoyCaption on a bundled/referenced llama-server; JARVIS mode reuses the
+    # Suite's caption server. Paths default to the transplanted Q4_K model; edit for your own build.
+    "ai_mode":                 "internal",     # "internal" | "jarvis"
+    # Vulkan b10012 build travels WITH the app (llama_cpp/vulkan_b10012/) — a relative path resolved
+    # against the ThumbsAI dir (caption_backend._resolve), so a fresh standalone install is fully
+    # self-contained (no dependency on the Suite). Vulkan (not ROCm) is required: ROCm dropped Polaris,
+    # so only the Vulkan build sees the RX 580 — see AI_Library/reference/vulkan-vs-rocm-7800xt.md.
+    # An ABSOLUTE path here still works (e.g. point at the Suite's or VC Core's shared build to save disk).
+    "ai_llama_dir":            "llama_cpp/vulkan_b10012",
+    # Relative to the ThumbsAI folder -> its own copy travels with the app (model independence).
+    # Swap in your finetuned JoyCaption here later.
+    # NeoJoy V4 — the finetuned JoyCaption (Q5_K_M, fits the RX 580 with flash-attn). Its OWN copy lives
+    # under models/joycaption/ — a relative path that resolves against the ThumbsAI app dir (_APP_DIR),
+    # so the model travels with the standalone. The mmproj is unchanged (vision frozen during finetuning).
+    "ai_joycaption_gguf":      "models/joycaption/NeoJoy-V4-Q5_K_M.gguf",
+    "ai_joycaption_mmproj":    "models/joycaption/llama-joycaption-beta-one-llava-mmproj-model-f16.gguf",
+    "ai_internal_port":        8082,           # ThumbsAI's own JoyCaption server (avoid Jarvis 8080/8081)
+    # Pin JoyCaption to a specific Vulkan GPU (GGML_VK_VISIBLE_DEVICES). "1" = the RX 580 on this box
+    # (Vulkan0=RX 7800 XT, Vulkan1=RX 580), so captioning stays off the main render GPU. "" = don't pin.
+    "ai_vulkan_device":        "1",
+    "ai_jarvis_caption_url":   "http://127.0.0.1:8081",   # Jarvis's caption server (JARVIS mode)
+    "ai_tag_merge":            True,           # merge AI tags with existing tags (vs overwrite)
+    # User tag-alias additions (Settings ▸ AI ▸ Tag alias map), layered over the built-in booru aliases
+    # in ai_ops._TAG_ALIASES. One 'from = to' per line; blank/'#'-comment lines ignored. Add terms here
+    # anytime — a tag matching 'from' is rewritten to 'to' on every pass. Empty = built-ins only.
+    "ai_tag_aliases":          "",
+    # ThumbsAI persona — the captioner's job description (how it should tag). Editable in Settings ▸ AI.
+    # BOORU style: underscore_separated single-token tags = reliable, consistent search atoms.
+    "ai_instruction": (
+        "Tag this image in DANBOORU (booru) style: a comma-separated list of concise lowercase tags "
+        "with underscores instead of spaces — e.g. 1girl, solo, long_hair, red_hair, blue_eyes, "
+        "large_breasts, denim_jacket, outdoors, park, night, standing, looking_at_viewer, "
+        "photorealistic. Order roughly: subject count (1girl / 1boy / solo / 2girls) first, then "
+        "body and appearance (hair, eyes, build), then clothing or state of dress, then setting or "
+        "location, then action or pose, then art style or medium. Prefer established booru tags you "
+        "already know. Output ONLY the tags separated by commas — lowercase, underscores_between_words, "
+        "no sentences, no articles, no explanations."),
+    # LLM parameters (JoyCaption load preset + sampling) — mirrors Jarvis's per-model fields.
+    "ai_temperature":          0.4,
+    "ai_max_tokens":           200,
+    "ai_n_ctx":                4096,
+    "ai_n_gpu_layers":         -1,             # -1 = all layers on GPU
+    "ai_flash_attn":           True,
+    "ai_cache_type_k":         "f16",          # f16 | q8_0 | q4_0
+    "ai_cache_type_v":         "f16",
 }
 
 

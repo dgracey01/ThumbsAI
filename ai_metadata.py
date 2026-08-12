@@ -42,8 +42,10 @@ def parse_png_metadata(filepath: str | None, raw_bytes: bytes | None = None) -> 
         except Exception:
             pass
 
-    # NovelAI
-    if "Description" in info or "Comment" in info:
+    # NovelAI — require a REAL NovelAI signature. "Description"/"Comment" alone are standard PNG tEXt
+    # chunks written by tons of non-AI software (game assets, Logitech, SteamVR, screenshots…), so keying
+    # on their mere presence false-tagged thousands of ordinary PNGs as NovelAI generations.
+    if _is_novelai(info):
         return _parse_novelai(info)
 
     # InvokeAI
@@ -126,6 +128,29 @@ def _parse_comfyui(prompt_json: dict) -> dict:
             result["negative_prompt"] = prompts[1]
 
     return {k: v for k, v in result.items() if v or k in ("source", "raw_meta")}
+
+
+def _is_novelai(info: dict) -> bool:
+    """True only for a GENUINE NovelAI PNG. NovelAI writes Software='NovelAI' (definitive) and a
+    Comment tEXt chunk holding NovelAI-shaped generation JSON. Generic Description/Comment chunks from
+    other software must NOT match (that was the false-positive bug)."""
+    if str(info.get("Software", "")).strip() == "NovelAI":
+        return True
+    if "novelai" in str(info.get("Source", "")).lower():
+        return True
+    c = info.get("Comment")
+    if c:
+        try:
+            d = json.loads(c)
+            # NovelAI's Comment JSON always pairs a generation key with a NovelAI-specific one; ordinary
+            # Comment chunks (plain strings or unrelated JSON) won't have this shape.
+            if isinstance(d, dict) and \
+               any(k in d for k in ("uc", "uncond_scale", "noise_schedule", "sm_dyn", "cfg_rescale")) and \
+               any(k in d for k in ("steps", "sampler", "seed", "scale")):
+                return True
+        except Exception:
+            pass
+    return False
 
 
 def _parse_novelai(info: dict) -> dict:

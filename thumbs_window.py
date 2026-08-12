@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QMenu,
     QSpinBox,
+    QDoubleSpinBox,
     QDialog,
     QCheckBox,
     QFileDialog,
@@ -54,6 +55,7 @@ from theme import (
 )
 from database     import ThumbsDB
 from folder_panel import FolderPanel
+from ai_console   import AIConsole
 from settings     import AppSettings
 from tasks_panel  import TasksPanel
 from thumb_grid   import (ThumbGrid, DEFAULT_THUMB, MIN_THUMB, MAX_THUMB,
@@ -1167,8 +1169,9 @@ class ThumbsWindow(QMainWindow):
         btn_scan_folder = self._mk_icon_dropdown_btn(
             _icon("scan folder.webp"),
             tooltip="Scan Folder",
-            actions=[("Scan Folder",    self._on_scan_folder),
-                     ("Remove Orphans", self._on_remove_orphans_folder)])
+            actions=[("Scan Folder",       self._on_scan_folder),
+                     ("Remove Orphans",    self._on_remove_orphans_folder),
+                     ("Remove All Orphans", self._on_remove_orphans_disk)])
 
         btn_scan_disk = self._mk_icon_dropdown_btn(
             _icon("scan disk.webp"),
@@ -1447,7 +1450,29 @@ class ThumbsWindow(QMainWindow):
         self._folder_panel.refresh_clicked.connect(self._on_refresh)
         self._folder_panel.watch_toggled.connect(self._on_watch_toggled)
         self._folder_panel.files_dropped.connect(self._on_files_dropped)
-        left_vbox.addWidget(self._folder_panel, stretch=1)
+
+        # AI console occupies the lower third of the left column (folder tree on top, draggable divider).
+        self._ai_console = AIConsole(db=self._db)
+        self._ai_console.set_mode(self._settings.get("ai_mode", "internal"))
+        self._ai_console.set_tag_mode(bool(self._settings.get("ai_tag_merge", True)))
+        self._ai_console.tag_mode_changed.connect(self._on_ai_tag_mode_changed)
+        self._ai_console.find_dupes_requested.connect(self._on_ai_find_dupes)
+        self._ai_console.tag_folder_requested.connect(self._on_ai_tag_folder)
+        self._ai_console.fetch_requested.connect(self._on_ai_fetch)
+        self._ai_console.image_dropped.connect(self._on_ai_drop_search)
+        self._ai_console.ask_requested.connect(self._on_ai_ask)
+        self._ai_console.stop_requested.connect(self._on_ai_stop)
+        self._ai_console.mode_changed.connect(self._on_ai_mode_changed)
+        self._left_vsplit = QSplitter(Qt.Vertical)
+        self._left_vsplit.setStyleSheet(
+            f"QSplitter::handle{{background:{MUT};}}"
+            f"QSplitter::handle:vertical{{height:3px;}}")
+        self._left_vsplit.addWidget(self._folder_panel)
+        self._left_vsplit.addWidget(self._ai_console)
+        self._left_vsplit.setStretchFactor(0, 2)     # tree ~2/3
+        self._left_vsplit.setStretchFactor(1, 1)     # console ~1/3
+        self._left_vsplit.setSizes([420, 210])
+        left_vbox.addWidget(self._left_vsplit, stretch=1)
 
         self._tasks_panel = TasksPanel()
         self._tasks_panel.set_enabled(bool(self._settings.get("show_tasks_panel")))
@@ -1570,6 +1595,314 @@ class ThumbsWindow(QMainWindow):
         # Defer watcher rebuild so the folder renders before the blocking
         # iterdir() + addPaths() calls freeze the event loop.
         QTimer.singleShot(0, lambda p=path: self._update_watcher(p))
+
+    # ── AI console handlers ──────────────────────────────────────────────────────
+    def _on_ai_mode_changed(self, mode: str):
+        """Internal (in-app JoyCaption) / Jarvis-driven / Off. Leaving Internal (or choosing Off) STOPS
+        our own JoyCaption server so its VRAM is freed immediately — that's what keeps two copies of
+        JoyCaption (~12 GB) from sitting on a 16 GB card at once."""
+        self._settings.set("ai_mode", mode)
+        # Always unload OUR server when leaving internal mode (never touches Jarvis's process).
+        cap = getattr(self, "_captioner", None)
+        if cap is not None:
+            try:
+                cap.stop()
+            except Exception:
+                pass
+        self._captioner = None          # rebuild against the new endpoint on next use
+        if mode == "internal":
+            self._ai_console.log("Mode: INTERNAL — ThumbsAI runs its own JoyCaption (loads on first use).")
+        elif mode == "jarvis":
+            self._ai_console.log("Mode: JARVIS — reuses the Suite's caption server "
+                                 "(start Jarvis + load JoyCaption). Ours is unloaded.")
+        else:
+            self._ai_console.log("Mode: OFF — JoyCaption unloaded, VRAM freed. "
+                                 "Find dupes still works (it needs no model).")
+
+    def _on_ai_tag_mode_changed(self, merge: bool):
+        """Add/Replace dropdown flipped — persist it (same key as Settings ▸ AI 'Merge/Override')."""
+        self._settings.set("ai_tag_merge", bool(merge))
+        if merge:
+            self._ai_console.log("Tag mode: ADD — new tags merge into existing; a re-run skips "
+                                 "already-tagged images (resumes a big folder).")
+        else:
+            self._ai_console.log("Tag mode: REPLACE — Tag folder re-tags every image and OVERWRITES "
+                                 "its tags.")
+
+    def _on_ai_stop(self):
+        """Request cancellation of the running AI job (workers poll this flag)."""
+        self._ai_cancel = True
+        w = getattr(self, "_ai_worker", None)
+        if w is not None and w.isRunning():
+            w.cancel()
+        self._ai_console.log("Stopping…")
+
+    def _ai_busy(self) -> bool:
+        w = getattr(self, "_ai_worker", None)
+        if w is not None and w.isRunning():
+            self._ai_console.log("A job is already running — Stop it first.")
+            return True
+        return False
+
+    def _ai_ready(self) -> bool:
+        """Gate for the model-backed actions (tag / fetch). Off = refuse without loading anything, and
+        warn if the Suite's JoyCaption is ALREADY resident (loading ours too would double the VRAM)."""
+        if (self._settings.get("ai_mode", "internal") or "").lower() == "off":
+            self._ai_console.log("AI is OFF — set the mode to Internal or Jarvis first. "
+                                 "(Find dupes works with AI off.)")
+            return False
+        if getattr(self, "_captioner", None) is None:
+            from caption_backend import Captioner
+            self._captioner = Captioner(self._settings)
+        if self._captioner.mode() == "internal" and self._captioner.jarvis_server_up():
+            self._ai_console.log("NOTE: Jarvis's JoyCaption is already loaded. Switch to Jarvis mode to "
+                                 "reuse it instead of loading a second copy into VRAM.")
+        return True
+
+    def _on_ai_find_dupes(self):
+        folder = getattr(self, "_current_folder", "")
+        if not folder:
+            self._ai_console.log("Pick a folder first."); return
+        if self._ai_busy():
+            return
+        self._ai_cancel = False
+        self._ai_console.set_busy(True, "dupes")
+        self._ai_console.log(f"Scanning {folder} for duplicates…")
+        from ai_worker import DupeWorker
+        self._ai_worker = DupeWorker(self._db, folder, recursive=False, threshold=5)
+        self._ai_worker.progress.connect(self._ai_console.set_progress)
+        self._ai_worker.log.connect(self._ai_console.log)
+        self._ai_worker.done.connect(self._on_dupes_found)
+        self._ai_worker.start()
+
+    def _on_dupes_found(self, groups):
+        self._ai_console.set_busy(False)
+        if self._ai_cancel:
+            self._ai_console.log("Cancelled."); return
+        if not groups:
+            self._ai_console.log("No duplicates found."); return
+        n_imgs = sum(len(g["paths"]) for g in groups)
+        n_exact = sum(len(g["exact"]) for g in groups)
+        self._ai_console.log(f"Found {len(groups)} group(s), {n_imgs} images "
+                             f"({n_exact} byte-identical).")
+        import ai_ops
+        flagged = ai_ops.mark_duplicate_rejects(self._db, groups)
+        self._ai_console.log(f"Flagged {flagged} extra(s) as Reject — review in the grid, then cull.")
+        if getattr(self, "_current_folder", ""):
+            self._grid.load_folder(self._current_folder)
+
+    @staticmethod
+    def _fmt_dur(secs):
+        if secs < 90:
+            return f"~{int(secs)}s"
+        if secs < 5400:
+            return f"~{secs/60:.0f} min"
+        return f"~{secs/3600:.1f} hours"
+
+    def _refresh_tag_aliases(self):
+        """Push the user's Settings ▸ AI alias-map text into ai_ops so the next tag/fetch pass uses it
+        (layered over the built-in booru aliases). Cheap; safe to call before every AI operation."""
+        try:
+            import ai_ops
+            ai_ops.set_user_aliases(ai_ops.parse_aliases(self._settings.get("ai_tag_aliases", "")))
+        except Exception:
+            pass
+
+    def _on_ai_tag_folder(self):
+        if self._ai_busy():
+            return
+        # Scope: the SELECTED images if any are selected, else the whole current folder.
+        sel = self._grid.selected_paths()
+        if sel:
+            rows = [self._db.get(p) or {"filepath": p, "tags": ""} for p in sel]
+            scope = f"{len(sel)} selected image(s)"
+        else:
+            folder = getattr(self, "_current_folder", "")
+            if not folder:
+                self._ai_console.log("Pick a folder, or select images, first."); return
+            rows = self._db.filter_images(folder=folder, with_thumbnails=False, limit=200000)
+            if not rows:
+                self._ai_console.log("No indexed images here — scan the folder first."); return
+            scope = "this folder"
+        # Write mode (Settings ▸ AI ▸ "Merge … / OVERRIDE") decides what a SECOND run does:
+        #   Merge    → skip images that already have tags, so a re-run RESUMES a big folder (additive,
+        #              work saved as it goes).
+        #   Override → re-tag EVERY image and REPLACE its tags — regenerate the whole folder after you
+        #              change the persona or alias map. A second run here DELIBERATELY overrides.
+        merge = bool(self._settings.get("ai_tag_merge", True))
+        if merge:
+            paths = [r["filepath"] for r in rows if not (r.get("tags") or "").strip()]
+            if not paths:
+                self._ai_console.log("Nothing to tag — every image here already has tags.  "
+                                     "(Uncheck 'Merge' in Settings ▸ AI to re-tag / override.)"); return
+        else:
+            paths = [r["filepath"] for r in rows]
+            if not paths:
+                self._ai_console.log("No indexed images here — scan the folder first."); return
+        noun = "untagged image(s)" if merge else "image(s) (OVERRIDE — replaces existing tags)"
+        # Pre-flight: warn + estimate before a big job (JoyCaption is ~3 s/image, one at a time).
+        if len(paths) > 300:
+            est = self._fmt_dur(len(paths) * 3)
+            tail = ("tagged images are saved and will be skipped if you run it again."
+                    if merge else "this REPLACES the current tags on every image in scope.")
+            m = QMessageBox(self)
+            m.setWindowTitle("Auto-tag")
+            m.setText(f"Tag {len(paths)} {noun} in {scope}?\n\n"
+                      f"JoyCaption runs one at a time — roughly {est}. You can Stop anytime; {tail}")
+            m.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            m.setStyleSheet(f"QMessageBox{{background:{BG};color:{PRI};}}QLabel{{color:{PRI};}}")
+            if m.exec() != QMessageBox.Yes:
+                self._ai_console.log("Tagging cancelled."); return
+        if not self._ai_ready():
+            return
+        self._refresh_tag_aliases()          # pick up any Settings ▸ AI alias-map edits before this run
+        self._ai_cancel = False
+        self._ai_console.set_busy(True, "tag")
+        self._ai_console.log(f"Auto-tagging {len(paths)} {noun}  ({self._fmt_dur(len(paths)*3)})…")
+        from ai_worker import CaptionWorker
+        self._ai_worker = CaptionWorker(self._db, self._captioner, paths, merge=merge)
+        self._ai_worker.progress.connect(self._ai_console.set_progress)
+        self._ai_worker.log.connect(self._ai_console.log)
+        self._ai_worker.caption.connect(lambda name, tags: self._ai_console.log(f"  {name}: {tags}"))
+        self._ai_worker.done.connect(self._on_captions_done)
+        self._ai_worker.start()
+
+    def _on_captions_done(self, n):
+        self._ai_console.set_busy(False)
+        if self._ai_cancel:
+            self._ai_console.log(f"Cancelled — {n} tagged before stop.");
+        else:
+            self._ai_console.log(f"Done — tagged {n} image(s); now searchable by content.")
+        if getattr(self, "_current_folder", ""):
+            self._grid.load_folder(self._current_folder)
+
+    def _on_ai_fetch(self):
+        """Caption the SELECTED image, then search the library for others sharing its top concepts."""
+        sel = self._grid.selected_paths()
+        if not sel:
+            self._ai_console.log("Select an image (or drop one on the console), then Fetch similar."); return
+        self._start_fetch(sel[0])
+
+    def _on_ai_drop_search(self, path):
+        """An image was dropped on the console — search the library by it (may be an OUTSIDE file)."""
+        self._start_fetch(path)
+
+    def _start_fetch(self, path):
+        """Caption `path` (grid selection or a dropped file) on a worker, then search by its concepts."""
+        if self._ai_busy():
+            return
+        import os
+        if not os.path.isfile(path):
+            self._ai_console.log(f"Not a file: {path}"); return
+        self._ai_last_image = path            # remember for the Ask box when nothing is grid-selected
+        if not self._ai_ready():
+            return
+        self._refresh_tag_aliases()          # fetch derives concepts via _clean_tags → honour aliases too
+        self._ai_cancel = False
+        self._ai_console.set_busy(True, "fetch")
+        self._ai_console.set_progress(0, 0)
+        self._ai_console.log(f"Fetching images similar to {os.path.basename(path)}…")
+        from ai_worker import FetchWorker
+        self._ai_worker = FetchWorker(self._captioner, path)
+        self._ai_worker.log.connect(self._ai_console.log)
+        self._ai_worker.done.connect(self._on_fetch_done)
+        self._ai_worker.start()
+
+    @staticmethod
+    def _looks_like_search(text: str) -> bool:
+        """A console line is a library SEARCH (not a question about an image) if it opens with a search
+        verb ('show me…', 'find…', 'search…') or contains a 'pictures of …' phrase."""
+        import re
+        return bool(
+            re.match(r"\s*(please\s+)?(show|find|search|display|list|pull\s*up|get\s*me|look\s*for|"
+                     r"give\s*me)\b", text, re.I)
+            or re.search(r"\b(pictures?|images?|photos?|pics?|shots?)\s+(of|with|showing|containing)\b",
+                         text, re.I))
+
+    def _nl_to_query(self, text: str) -> str:
+        """Turn a natural-language request into a tag query, e.g.
+        'show me pictures of a blonde woman in a park' -> '1girl blonde park'. Strips the search
+        lead-in, drops stopwords, and normalizes each remaining word to the SAME booru/alias vocabulary
+        the tagger used (so 'woman' finds '1girl'-tagged images)."""
+        import re
+        import ai_ops
+        t = re.sub(r"^\s*(please\s+)?(show me|show|find|search(\s+for)?|pull\s*up|get\s*me|display|"
+                   r"list|give\s*me|look\s*for)\b[:,]?\s*", "", text.strip(), flags=re.I)
+        t = re.sub(r"^\s*(all\s+)?(the\s+)?(pictures?|images?|photos?|pics?|shots?|thumbnails?)\s+"
+                   r"(of|with|showing|containing|that\s+\w+)\s+", "", t, flags=re.I)
+        stop = {"a", "an", "the", "of", "with", "in", "on", "at", "and", "or", "some", "any", "that",
+                "this", "these", "those", "is", "are", "showing", "me", "all", "her", "his", "their"}
+        terms, seen = [], set()
+        for w in re.split(r"[\s,]+", t):
+            n = ai_ops._normalize_tag(w)
+            if not n or n in stop or n in seen:
+                continue
+            seen.add(n)
+            terms.append(n)
+        return " ".join(terms)
+
+    def _run_library_search(self, prompt: str):
+        """Search the tagged library from a console line, mirroring what the search box does."""
+        self._refresh_tag_aliases()                     # search vocabulary must match the tag vocabulary
+        query = self._nl_to_query(prompt)
+        if not query:
+            self._ai_console.log("Nothing to search for — try 'show me pictures of a blonde woman in a "
+                                 "park'.  (Select an image first to ask JoyCaption ABOUT it.)")
+            return
+        self._ai_console.log(f"Search → {query}")
+        self._search_edit.blockSignals(True)
+        self._search_edit.setText(query)
+        self._search_edit.blockSignals(False)
+        self._grid.search(query)
+
+    def _on_ai_ask(self, prompt: str):
+        """Console text box, two jobs in one:
+          • SEARCH — 'show me pictures of …' (or any line when no image is selected) searches the library.
+          • ASK    — a question with an image selected is put to JoyCaption ABOUT that image (read-only,
+                     never writes tags)."""
+        if self._ai_busy():
+            self._ai_console.log("Busy — wait for the current job (or Stop it) first."); return
+        import os
+        sel = self._grid.selected_paths()
+        img = sel[0] if sel else getattr(self, "_ai_last_image", "")
+        have_img = bool(img and os.path.isfile(img))
+        # Route to library search on search phrasing, or whenever there's no image to interrogate.
+        if self._looks_like_search(prompt) or not have_img:
+            self._run_library_search(prompt)
+            return
+        # Otherwise it's a question about the selected/last image → ask JoyCaption.
+        if not self._ai_ready():
+            return
+        self._ai_cancel = False
+        self._ai_console.set_busy(True, "ask")
+        self._ai_console.set_progress(0, 0)
+        self._ai_console.log(f"You → {prompt}")
+        self._ai_console.log(f"  (about {os.path.basename(img)})")
+        from ai_worker import AskWorker
+        self._ai_worker = AskWorker(self._captioner, prompt, img)
+        self._ai_worker.log.connect(self._ai_console.log)
+        self._ai_worker.done.connect(self._on_ask_done)
+        self._ai_worker.start()
+
+    def _on_ask_done(self, text: str):
+        self._ai_console.set_busy(False)
+        self._ai_console.log(f"JoyCaption → {text}" if text else "JoyCaption → (no reply)")
+
+    def _on_fetch_done(self, text):
+        self._ai_console.set_busy(False)
+        if self._ai_cancel or not text:
+            self._ai_console.log("Fetch cancelled or nothing to match."); return
+        import ai_ops
+        tags = ai_ops._clean_tags(text)
+        if not tags:
+            self._ai_console.log("Couldn't derive concepts from that image."); return
+        # top 3 concepts (subject-first) AND-ed — a focused 'more like this'; editable in the search box
+        query = " ".join(tags[:3])
+        self._ai_console.log(f"Similar to: {query}")
+        self._search_edit.blockSignals(True)
+        self._search_edit.setText(query)
+        self._search_edit.blockSignals(False)
+        self._grid.search(query)
 
     def _reset_filter_ui(self):
         """Drop the rating/label facets back to 'all' (called when the folder changes)."""
@@ -1796,7 +2129,14 @@ class ThumbsWindow(QMainWindow):
         def _run():
             removed = self._db.delete_missing(folder)
             word = "entry" if removed == 1 else "entries"
-            self._bg_status.emit(f"Removed {removed} orphan DB {word}")
+            # Fast path only here (convert_if_needed=False): a quick folder cleanup must NOT trigger the
+            # one-time whole-DB VACUUM. Space is reclaimed incrementally once the DB has been converted
+            # (which happens on the deliberate "Remove All Orphans" sweep below).
+            freed = self._db.reclaim(convert_if_needed=False) if removed else 0
+            msg = f"Removed {removed} orphan DB {word}"
+            if freed:
+                msg += f" · reclaimed {freed/1048576:.0f} MB"
+            self._bg_status.emit(msg)
             if removed:
                 QTimer.singleShot(0, self._grid.refresh)
         import threading
@@ -1807,6 +2147,26 @@ class ThumbsWindow(QMainWindow):
         self._grid.scan_all_folders(folders)
 
     def _on_remove_orphans_disk(self):
+        # Whole-database orphan sweep: every folder is checked and any row whose file no longer
+        # exists on disk is deleted. Destructive across the ENTIRE library, so confirm first — and
+        # warn that a currently-offline/unmounted drive (e.g. a disconnected NAS) reads as "missing"
+        # and would have all its entries removed.
+        from PySide6.QtWidgets import QMessageBox
+        nf = len(self._db.all_folders())
+        mb = QMessageBox(self)
+        mb.setIcon(QMessageBox.Warning)
+        mb.setWindowTitle("Remove All Orphans")
+        mb.setText(f"Remove orphaned entries across the entire database ({nf} folders)?")
+        mb.setInformativeText(
+            "Any indexed file that is not found on disk right now will be deleted from the database.\n\n"
+            "⚠  Files on drives that are currently offline or unmounted (e.g. a disconnected NAS) count "
+            "as missing and WILL be removed. Only proceed if those drives are connected — or if you want "
+            "those entries gone. Re-scanning restores them if the drive comes back.")
+        mb.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
+        mb.setDefaultButton(QMessageBox.Cancel)
+        if mb.exec() != QMessageBox.Yes:
+            self._on_status("Remove All Orphans cancelled")
+            return
         self._on_status("Scanning all folders for orphans…")
         def _run():
             folders = self._db.all_folders()
@@ -1818,9 +2178,17 @@ class ThumbsWindow(QMainWindow):
                     self._bg_status.emit(
                         f"Orphan scan: {i}/{nf} folders checked, {total} removed so far…")
             word = "entry" if total == 1 else "entries"
-            self._bg_status.emit(
-                f"Removed {total} orphan DB {word} across {nf} folder{'s' if nf != 1 else ''}")
-            if total:
+            # Reclaim disk unconditionally: the sweep is the deliberate maintenance action, so this is where
+            # a legacy DB gets its one-time convert-to-incremental + VACUUM (also shrinks any pre-existing
+            # free space). May take a minute on a large DB; it runs on this background thread so the UI is free.
+            self._bg_status.emit("Reclaiming disk space (one-time compaction may take a minute)…")
+            freed = self._db.reclaim()
+            msg = f"Removed {total} orphan DB {word} across {nf} folder{'s' if nf != 1 else ''}"
+            if freed:
+                gb = freed / 1073741824
+                msg += (f" · reclaimed {gb:.2f} GB" if gb >= 1 else f" · reclaimed {freed/1048576:.0f} MB")
+            self._bg_status.emit(msg)
+            if total or freed:
                 QTimer.singleShot(0, self._grid.refresh)
         import threading
         threading.Thread(target=_run, daemon=True).start()
@@ -1914,6 +2282,8 @@ class ThumbsWindow(QMainWindow):
             self._apply_font_settings()
             self._grid.rescan_plugins()
             self._update_watcher(self._current_folder)
+            # Keep the console's Add/Replace dropdown in step with the Settings ▸ AI 'Merge' toggle.
+            self._ai_console.set_tag_mode(bool(self._settings.get("ai_tag_merge", True)))
 
     def _apply_font_settings(self):
         self._folder_panel.set_font_size(
@@ -2142,6 +2512,16 @@ class ThumbsWindow(QMainWindow):
             self._settings._save_timer.cancel()
         self._settings.save()
 
+        # Stop any running AI job + our own JoyCaption server (INTERNAL mode) so it frees VRAM.
+        w = getattr(self, "_ai_worker", None)
+        if w is not None and w.isRunning():
+            w.cancel(); w.wait(3000)
+        if getattr(self, "_captioner", None) is not None:
+            try:
+                self._captioner.stop()
+            except Exception:
+                pass
+
         self._grid.shutdown()
         self._db.close()
         if self._tp_reader is not None:
@@ -2281,6 +2661,17 @@ _CHK_STYLE = lambda: (
 )
 
 
+class _WheelGuard(QObject):
+    """Stop the scroll-wheel from silently changing a spin-box / combo value on the settings page.
+    Qt steals the wheel on hover, so scrolling the page nudges whatever field is under the cursor. With
+    StrongFocus (set by the caller) hovering never grabs wheel focus, and this filter swallows any wheel
+    event the field gets unless it's explicitly focused — so values only change on purpose."""
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Wheel and not obj.hasFocus():
+            return True
+        return False
+
+
 class _SettingsDialog(QDialog):
     def __init__(self, settings: AppSettings, parent=None):
         super().__init__(parent)
@@ -2362,6 +2753,7 @@ class _SettingsDialog(QDialog):
         self._build_apps_page()
         self._build_plugins_page()
         self._build_database_page()
+        self._build_ai_page()
 
         self._cat_list.currentRowChanged.connect(self._stack.setCurrentIndex)
         self._cat_list.setCurrentRow(0)
@@ -2406,6 +2798,138 @@ class _SettingsDialog(QDialog):
             f"color:{SEC};font-size:{FONT_SM}px;font-weight:bold;"
             f"background:transparent;margin-top:8px;")
         layout.addWidget(lbl)
+
+    def _build_ai_page(self):
+        """AI tab — the ThumbsAI persona (how JoyCaption tags) + JoyCaption's LLM parameters, mirroring
+        Jarvis's per-model settings. Everything here feeds caption_backend.Captioner."""
+        from settings import _DEFAULTS as _SD
+        vl = self._add_page("AI")
+        s = self._settings
+
+        if not hasattr(self, "_ai_wheel_guard"):
+            self._ai_wheel_guard = _WheelGuard(self)
+
+        def _fld(w):
+            w.setStyleSheet(f"background:{CAR};color:{PRI};border:1px solid {MUT};border-radius:3px;"
+                            f"padding:3px 6px;font-family:{FONT};font-size:{FONT_SM}px;")
+            # spin/combo: scrolling the page must not nudge the value
+            if isinstance(w, (QSpinBox, QDoubleSpinBox, QComboBox)):
+                w.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+                w.installEventFilter(self._ai_wheel_guard)
+            return w
+
+        def _row(label, widget):
+            r = QHBoxLayout(); r.setContentsMargins(0, 0, 0, 0)
+            lb = QLabel(label); lb.setFixedWidth(150)
+            lb.setStyleSheet(f"color:{SEC};font-size:{FONT_SM}px;background:transparent;")
+            r.addWidget(lb); r.addWidget(widget, 1)
+            cont = QWidget(); cont.setLayout(r); vl.addWidget(cont)
+            return widget
+
+        def _browse_row(label, edit, is_dir=False, file_filter=""):
+            def go():
+                if is_dir:
+                    p = QFileDialog.getExistingDirectory(self, "Select folder", edit.text().strip())
+                else:
+                    p, _ = QFileDialog.getOpenFileName(self, "Select file", edit.text().strip(), file_filter)
+                if p:
+                    edit.setText(p)
+            r = QHBoxLayout(); r.setContentsMargins(0, 0, 0, 0)
+            lb = QLabel(label); lb.setFixedWidth(150)
+            lb.setStyleSheet(f"color:{SEC};font-size:{FONT_SM}px;background:transparent;")
+            b = QPushButton("Browse…"); b.clicked.connect(go)
+            r.addWidget(lb); r.addWidget(edit, 1); r.addWidget(b)
+            cont = QWidget(); cont.setLayout(r); vl.addWidget(cont)
+
+        # ── Mode ───────────────────────────────────────────────────────────────
+        self._section_label(vl, "BACKEND")
+        self._ai_mode_combo = _fld(QComboBox())
+        self._ai_mode_combo.addItem("Internal — ThumbsAI runs its own JoyCaption", "internal")
+        self._ai_mode_combo.addItem("Jarvis — reuse the Suite's caption server", "jarvis")
+        i = self._ai_mode_combo.findData(s.get("ai_mode", "internal"))
+        self._ai_mode_combo.setCurrentIndex(i if i >= 0 else 0)
+        _row("Mode", self._ai_mode_combo)
+
+        # ── Persona (the captioner's job description) ───────────────────────────
+        self._section_label(vl, "THUMBSAI PERSONA — how it tags")
+        self._ai_instruction = QTextEdit()
+        self._ai_instruction.setPlainText(s.get("ai_instruction", ""))
+        self._ai_instruction.setMinimumHeight(96)
+        self._ai_instruction.setStyleSheet(
+            f"QTextEdit{{background:{CAR};color:{PRI};border:1px solid {MUT};border-radius:3px;"
+            f"font-family:{FONT};font-size:{FONT_SM}px;padding:4px;}}")
+        vl.addWidget(self._ai_instruction)
+        rst = QPushButton("Reset persona to default")
+        rst.clicked.connect(lambda: self._ai_instruction.setPlainText(_SD["ai_instruction"]))
+        vl.addWidget(rst)
+
+        # ── Model files ─────────────────────────────────────────────────────────
+        self._section_label(vl, "MODEL FILES")
+        self._ai_gguf = _fld(QLineEdit(s.get("ai_joycaption_gguf", "")))
+        _browse_row("JoyCaption .gguf", self._ai_gguf, file_filter="GGUF (*.gguf)")
+        self._ai_mmproj = _fld(QLineEdit(s.get("ai_joycaption_mmproj", "")))
+        _browse_row("Vision mmproj", self._ai_mmproj, file_filter="GGUF (*.gguf)")
+        self._ai_llama_dir = _fld(QLineEdit(s.get("ai_llama_dir", "")))
+        _browse_row("llama-server dir", self._ai_llama_dir, is_dir=True)
+
+        # ── LLM parameters (mirror Jarvis) ──────────────────────────────────────
+        self._section_label(vl, "LLM PARAMETERS")
+        self._ai_temp = _fld(QDoubleSpinBox()); self._ai_temp.setRange(0.0, 2.0)
+        self._ai_temp.setSingleStep(0.05); self._ai_temp.setDecimals(2)
+        self._ai_temp.setValue(float(s.get("ai_temperature", 0.4)))
+        _row("Temperature", self._ai_temp)
+        self._ai_maxtok = _fld(QSpinBox()); self._ai_maxtok.setRange(16, 2048)
+        self._ai_maxtok.setValue(int(s.get("ai_max_tokens", 200)))
+        _row("Max tokens", self._ai_maxtok)
+        self._ai_nctx = _fld(QSpinBox()); self._ai_nctx.setRange(512, 131072)
+        self._ai_nctx.setValue(int(s.get("ai_n_ctx", 4096)))
+        _row("Context length", self._ai_nctx)
+        self._ai_ngl = _fld(QSpinBox()); self._ai_ngl.setRange(-1, 999)
+        self._ai_ngl.setValue(int(s.get("ai_n_gpu_layers", -1)))
+        _row("GPU layers (-1=all)", self._ai_ngl)
+        self._ai_fa = QCheckBox("Flash attention"); self._ai_fa.setChecked(bool(s.get("ai_flash_attn", True)))
+        self._ai_fa.setStyleSheet(f"color:{PRI};font-size:{FONT_SM}px;")
+        vl.addWidget(self._ai_fa)
+        self._ai_ck = _fld(QComboBox()); self._ai_ck.addItems(["f16", "q8_0", "q4_0"])
+        self._ai_ck.setCurrentText(s.get("ai_cache_type_k", "f16"))
+        _row("KV cache K type", self._ai_ck)
+        self._ai_cv = _fld(QComboBox()); self._ai_cv.addItems(["f16", "q8_0", "q4_0"])
+        self._ai_cv.setCurrentText(s.get("ai_cache_type_v", "f16"))
+        _row("KV cache V type", self._ai_cv)
+
+        # ── Server + tagging ────────────────────────────────────────────────────
+        self._section_label(vl, "SERVER & TAGGING")
+        self._ai_int_port = _fld(QSpinBox()); self._ai_int_port.setRange(1024, 65535)
+        self._ai_int_port.setValue(int(s.get("ai_internal_port", 8082)))
+        _row("Internal port", self._ai_int_port)
+        self._ai_jarvis_url = _fld(QLineEdit(s.get("ai_jarvis_caption_url", "")))
+        _row("Jarvis caption URL", self._ai_jarvis_url)
+        self._ai_merge = QCheckBox("Merge new tags with existing (uncheck = OVERRIDE / re-tag)")
+        self._ai_merge.setChecked(bool(s.get("ai_tag_merge", True)))
+        self._ai_merge.setStyleSheet(f"color:{PRI};font-size:{FONT_SM}px;")
+        self._ai_merge.setToolTip(
+            "Checked (Merge): add new tags to what's already there, and SKIP images that already have "
+            "tags — so a re-run resumes a big folder instead of redoing it.\n"
+            "Unchecked (Override): re-tag EVERY image and REPLACE its tags — use this to regenerate the "
+            "whole folder after you change the persona or alias map.")
+        vl.addWidget(self._ai_merge)
+
+        # ── Tag alias map (canonical term swaps; add more anytime) ──────────────────
+        self._section_label(vl, "TAG ALIAS MAP — canonical term swaps")
+        hint = QLabel("One per line:  from = to   (e.g.  breasts = boobs).  Applied to every tag on top "
+                      "of the built-in booru aliases; your pairs win. Blank lines and #comments ignored.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color:{SEC};font-size:{FONT_SM}px;background:transparent;")
+        vl.addWidget(hint)
+        self._ai_aliases = QTextEdit()
+        self._ai_aliases.setPlainText(s.get("ai_tag_aliases", ""))
+        self._ai_aliases.setPlaceholderText("breasts = boobs\nbuttocks = butt\nabdomen = abs")
+        self._ai_aliases.setMinimumHeight(80)
+        self._ai_aliases.setStyleSheet(
+            f"QTextEdit{{background:{CAR};color:{PRI};border:1px solid {MUT};border-radius:3px;"
+            f"font-family:{FONT};font-size:{FONT_SM}px;padding:4px;}}")
+        vl.addWidget(self._ai_aliases)
+        vl.addStretch(1)
 
     def _build_general_page(self):
         vl = self._add_page("General")
@@ -3126,4 +3650,22 @@ class _SettingsDialog(QDialog):
         self._settings.set("launch_apps",
                            [a for a in self._apps_data if a.get("exe")])
         self._settings.set("plugin_dirs", list(self._plugin_dirs_data))
+
+        # ── AI page ──────────────────────────────────────────────────────────
+        self._settings.set("ai_mode", self._ai_mode_combo.currentData())
+        self._settings.set("ai_instruction", self._ai_instruction.toPlainText().strip())
+        self._settings.set("ai_joycaption_gguf", self._ai_gguf.text().strip())
+        self._settings.set("ai_joycaption_mmproj", self._ai_mmproj.text().strip())
+        self._settings.set("ai_llama_dir", self._ai_llama_dir.text().strip())
+        self._settings.set("ai_temperature", round(float(self._ai_temp.value()), 2))
+        self._settings.set("ai_max_tokens", int(self._ai_maxtok.value()))
+        self._settings.set("ai_n_ctx", int(self._ai_nctx.value()))
+        self._settings.set("ai_n_gpu_layers", int(self._ai_ngl.value()))
+        self._settings.set("ai_flash_attn", self._ai_fa.isChecked())
+        self._settings.set("ai_cache_type_k", self._ai_ck.currentText())
+        self._settings.set("ai_cache_type_v", self._ai_cv.currentText())
+        self._settings.set("ai_internal_port", int(self._ai_int_port.value()))
+        self._settings.set("ai_jarvis_caption_url", self._ai_jarvis_url.text().strip())
+        self._settings.set("ai_tag_merge", self._ai_merge.isChecked())
+        self._settings.set("ai_tag_aliases", self._ai_aliases.toPlainText().strip())
         self.accept()

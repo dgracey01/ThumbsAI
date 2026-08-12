@@ -12,3 +12,11 @@ push.bat
 PACK_RELEASE.bat
 _releases/
 _backups/
+# Bundled AI payload — travels via PACK_RELEASE (working tree), never committed to git:
+#   models/     JoyCaption gguf + mmproj (multi-GB)
+#   llama_cpp/  Vulkan llama-server build (~93 MB incl. app-local VC++ runtime)
+models/
+*.gguf
+llama_cpp/
+# Runtime crash / server logs (can be large)
+*.log

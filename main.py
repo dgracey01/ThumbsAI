@@ -22,6 +22,16 @@ if _VENV_PY.exists():
         sys.exit(0)
 # ──────────────────────────────────────────────────────────────────────────────
 
+# Crash capture (installed AFTER the venv re-exec so the REAL process is the one guarded).
+# The existing startup_error.log only catches Python exceptions during main(); this adds
+# faulthandler (native faults in PIL/Qt/torch leave a stack instead of vanishing) and a
+# threading hook (worker-thread exceptions are otherwise swallowed silently by Qt).
+try:
+    import crash_log
+    crash_log.install()
+except Exception:
+    pass
+
 _LOG = Path(__file__).parent / "data" / "startup_error.log"
 
 
@@ -65,6 +75,29 @@ def main():
             if not _lock.tryLock(200):
                 QMessageBox.warning(None, "ThumbsAI", "ThumbsAI is already running.")
                 sys.exit(0)
+
+        # VRAM hygiene: kill any JoyCaption llama-server we ORPHANED in a previous (crashed/closed)
+        # session — it was left squatting on the RX 580 — then stop it cleanly when ThumbsAI quits so we
+        # never leave VRAM trash behind. Only touches OUR captioner port (a co-running Jarvis captioner
+        # on 8081 is untouched). Runs only after we've won the single-instance lock above.
+        try:
+            import atexit
+            import llama_server
+            from settings import AppSettings
+            _cap_port = int(AppSettings().get("ai_internal_port", 8082))
+            _n = llama_server.kill_stale_servers((_cap_port,))
+            if _n:
+                print(f"[thumbsai] freed VRAM: killed {_n} orphaned JoyCaption server(s) from a previous session")
+
+            def _stop_captioner():
+                try:
+                    llama_server.kill_stale_servers((_cap_port,))
+                except Exception:
+                    pass
+            app.aboutToQuit.connect(_stop_captioner)   # clean quit
+            atexit.register(_stop_captioner)            # backstop for a hard/crash exit
+        except Exception as _e:
+            print("[thumbsai] captioner VRAM-cleanup setup failed:", _e)
 
         from theme         import apply_theme
         from thumbs_window import ThumbsWindow
